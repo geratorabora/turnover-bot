@@ -1,3 +1,5 @@
 aiogram
 python-dotenv
 psycopg[binary]
+pandas
+openpyxl

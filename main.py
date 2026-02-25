@@ -8,6 +8,10 @@ from dotenv import load_dotenv  # Загрузка .env (локально)
 
 import psycopg  # Библиотека для подключения к PostgreSQL
 
+import pandas as pd  # pandas нужен, чтобы читать Excel в DataFrame
+from pathlib import Path  # Path удобен для работы с путями/файлами
+import tempfile  # tempfile создаёт временные файлы/папки безопасно
+
 
 load_dotenv()  # Загружаем переменные из .env (локально это полезно, в Railway не мешает)
 
@@ -68,6 +72,49 @@ async def main() -> None:
 
 
     await dp.start_polling(bot)  # Запуск бота
+
+        # Любой присланный документ (файл)
+    @dp.message(F.document)
+    async def handle_document(message: Message):
+        # Проверяем, что это Excel-файл по расширению (простая защита)
+        filename = message.document.file_name  # Имя файла, которое прислал пользователь
+        if not filename.lower().endswith(".xlsx"):  # Если расширение не .xlsx
+            await message.answer("Пришли, пожалуйста, файл .xlsx")  # Просим правильный формат
+            return  # Выходим
+
+        # Создаём временную папку для скачивания файла
+        with tempfile.TemporaryDirectory() as tmp_dir:  # Папка удалится автоматически после выхода из блока
+            tmp_path = Path(tmp_dir) / filename  # Полный путь, куда сохраним файл
+
+            # Скачиваем файл из Telegram на диск (временный)
+            file = await message.bot.get_file(message.document.file_id)  # Получаем путь к файлу на серверах Telegram
+            await message.bot.download_file(file.file_path, destination=tmp_path)  # Скачиваем файл локально
+
+            try:
+                # Читаем Excel: по умолчанию берётся первый лист
+                df = pd.read_excel(tmp_path)  # Загружаем таблицу в DataFrame
+
+                # Получаем список колонок
+                cols = list(df.columns)  # Превращаем Index в обычный список
+
+                # Проверяем, что ключевая колонка Period есть
+                if "Period" not in cols:
+                    await message.answer(
+                        "Файл прочитан, но не вижу колонку 'Period'. Проверь лист/структуру отчёта."
+                    )
+                    return
+
+                # Отвечаем кратким отчётом: сколько строк и первые 5 колонок
+                await message.answer(
+                    f"✅ Excel прочитан.\n"
+                    f"Строк: {len(df)}\n"
+                    f"Колонок: {len(cols)}\n"
+                    f"Первые колонки: {cols[:5]}"
+                )
+
+            except Exception as e:
+                # Если чтение Excel упало — покажем тип ошибки и текст
+                await message.answer(f"❌ Не смог прочитать Excel: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
