@@ -79,6 +79,24 @@ async def main() -> None:  # Главная асинхронная функци�
             except Exception as e:  # Если чтение упало
                 await message.answer(f"❌ Не смог прочитать Excel: {type(e).__name__}: {e}")  # Сообщаем ошибку
 
+    @dp.message()  # Ловим вообще всё, что не поймали другие хэндлеры
+    async def debug_any(message: Message):
+        # Соберём признаки сообщения
+        has_text = message.text is not None
+        has_document = message.document is not None
+        has_photo = message.photo is not None
+        has_caption = message.caption is not None
+
+        # Сформируем короткий отчёт
+        await message.answer(
+            "DEBUG:\n"
+            f"text={has_text}\n"
+            f"document={has_document}\n"
+            f"photo={has_photo}\n"
+            f"caption={has_caption}\n"
+            f"content_type={message.content_type}"
+        )
+
     await dp.start_polling(bot)  # Запускаем polling ПОСЛЕ регистрации всех обработчиков
 
 
