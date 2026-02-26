@@ -197,17 +197,73 @@ def parse_timestamp(v: Any) -> Optional["datetime"]:
 
 
 # ===== 2B START =====
-def row_to_payload(row: pd.Series) -> Dict[str, Any]:
-    # 2B: вся строка → dict (ключи snake_case), чтобы хранить все поля отчёта в jsonb
+def row_to_payload(row: Any) -> Dict[str, Any]:
+    """
+    2B: Собираем payload для jsonb.
+
+    Правило:
+    - В момент вызова row_to_payload() row уже должен содержать колонки с DB-именами
+      (после df.rename(columns=RUS_TO_DB)).
+    - payload хранит "сырьё строки" в удобном виде:
+        * ключи = snake_case от DB-имени
+        * значения = нормализованные Python-типы (None вместо NaN)
+    """
+
+    # 2B: приводим вход к dict
+    if isinstance(row, pd.Series):
+        data = row.to_dict()
+    elif isinstance(row, dict):
+        data = row
+    else:
+        # на крайний случай
+        try:
+            data = dict(row)
+        except Exception:
+            return {}
+
     payload: Dict[str, Any] = {}
-    for col_name, value in row.items():
-        key = to_snake_case(col_name)
-        if isinstance(value, pd.Timestamp):
-            payload[key] = value.isoformat()
-        elif pd.isna(value):
-            payload[key] = None
-        else:
-            payload[key] = value
+
+    for k, v in data.items():
+        # 2B: пропускаем пустые ключи
+        if k is None:
+            continue
+
+        key = to_snake_case(str(k))
+
+        # 2B: NaN/NaT -> None
+        try:
+            if pd.isna(v):
+                payload[key] = None
+                continue
+        except Exception:
+            pass
+
+        # 2B: datetime / Timestamp -> ISO строка (чтобы json был чистый)
+        if isinstance(v, (pd.Timestamp, datetime)):
+            try:
+                payload[key] = v.isoformat()
+            except Exception:
+                payload[key] = str(v)
+            continue
+
+        # 2B: numpy типы / обычные числа
+        if isinstance(v, (int, float, bool)):
+            # float('nan') (на всякий случай)
+            if isinstance(v, float) and (v != v):
+                payload[key] = None
+            else:
+                payload[key] = v
+            continue
+
+        # 2B: строки
+        if isinstance(v, str):
+            s = v.strip()
+            payload[key] = s if s != "" else None
+            continue
+
+        # 2B: прочие типы (оставляем как есть, если сериализуется)
+        payload[key] = v
+
     return payload
 # ===== 2B END =====
 
