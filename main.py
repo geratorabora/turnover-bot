@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple  # 1A: типы
 
 import pandas as pd  # 1A: чтение Excel
 import psycopg  # 1A: PostgreSQL
+from psycopg.types.json import Jsonb  # 1A: упаковка dict → jsonb для Postgres
 from aiogram import Bot, Dispatcher, F  # 1A: aiogram
 from aiogram.types import Message  # 1A: тип сообщений
 from dotenv import load_dotenv  # 1A: .env
@@ -259,7 +260,7 @@ def upsert_dataframe(df: pd.DataFrame, source_file: str) -> Tuple[int, int]:
                 flat["rank"],
                 flat["reserve_qty"],
                 flat["nonliquid"],
-                payload,
+                Jsonb(payload)d,
             )
         )
 
