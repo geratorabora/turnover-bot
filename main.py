@@ -260,7 +260,7 @@ def upsert_dataframe(df: pd.DataFrame, source_file: str) -> Tuple[int, int]:
                 flat["rank"],
                 flat["reserve_qty"],
                 flat["nonliquid"],
-                Jsonb(payload)d,
+                Jsonb(payload),
             )
         )
 
