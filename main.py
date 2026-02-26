@@ -22,35 +22,54 @@ load_dotenv()  # 1B: грузим .env (локально полезно, в Rail
 
 
 # ===== 1C START =====
-BOT_TOKEN: Optional[str] = os.getenv("BOT_TOKEN")  # 1C: токен бота
-DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL")  # 1C: строка подключения к БД
+BOT_TOKEN: Optional[str] = os.getenv("BOT_TOKEN")  # 1C: токен Telegram-бота
+DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL")  # 1C: строка подключения к Postgres (Railway)
 
-TABLE_NAME: str = "public.raw_turnover_stock"  # 1C: куда грузим
+TABLE_NAME: str = "public.raw_turnover_stock"  # 1C: целевая таблица в БД (сырой слой)
 
 # 1C: синонимы значений да/нет (часто встречаются в отчётах)
 TRUE_WORDS = {"1", "true", "True", "TRUE", "да", "Да", "ДА", "yes", "Yes", "Y", "y"}
 FALSE_WORDS = {"0", "false", "False", "FALSE", "нет", "Нет", "НЕТ", "no", "No", "N", "n"}
 
-# 1C: “плоские” ключи, которые хотим держать отдельными колонками (для быстрых запросов)
-#     Остальные 29 полей — всё равно попадут в payload jsonb.
-FLAT_COLS: Dict[str, str] = {
-    "Period": "report_ts",
-    "Период": "report_ts",
-
-    "Номенклатура": "nomenclature",
-    "Номенклатура.Код": "nomenclature_code",
-    "Номенклатура.Код ": "nomenclature_code",
-
+# 1C: КОНТРАКТ колонок.
+#     Ключ = название колонки в Excel-отчёте (кириллица, как в файле).
+#     Значение = имя колонки в БД (латиница), как "по зелёной стрелке".
+#     Важно: названия в Excel считаем строго фиксированными.
+RUS_TO_DB: Dict[str, str] = {
+    "Номенклатура": "item",
+    "Номенклатура.Код": "item_code",
     "Номенклатура.Артикул": "article",
-    "Номенклатура.Артикул ": "article",
-
-    "Ранг": "rank",
-    "Рзв": "reserve_qty",
-    "Резерв": "reserve_qty",
-
-    "nonliquid": "nonliquid",
-    "Неликвид": "nonliquid",
+    "Номенклатура.Сегмент номенклатуры": "segment",
+    "Номенклатура.Сегмент номенклатуры.Родитель": "pg",
+    "Номенклатура.Группа управления запасами": "guz",
+    "Номенклатура.Группа аналитического учета": "gau",
+    "Номенклатура.Основной менеджер": "manager",
+    "Номенклатура.Основной поставщик": "supplier",
+    "Неликвид": "nonliq",
+    "Н-решение": "n_descn",
+    "Средний остаток, шт": "av_stock_qty",
+    "Расход, шт": "sales_qty",
+    "Выручка": "revenue",
+    "Конечный остаток (товары)": "curr_stock_qty",
+    "Себестоимость (из отч. себ)": "curr_stock_cost",
+    "Себестоимость продаж за период": "sales_cost",
+    "Себестоимость среднего остатка": "av_stock_cost",
+    "Оборачиваемость, руб": "turns_rub",
+    "Свободный остаток текущий": "free_stock_q_ty",
+    "Себестоимость свободного остатка": "free_stock_cost",
+    "Ранг": "rank_turns",
+    "Period": "period",
+    "Рзв": "rezerv_qty",
+    "Себ.Рзв": "rezerv_cost",
+    "Уровень": "level_turns",
+    "Вал.Пр": "margin",
+    "Рент. %": "prof_pc",
+    "Рент.Тов.Зап": "prof_stock",
 }
+
+# 1C: набор обязательных колонок после переименования (контроль контракта в коде)
+REQUIRED_DB_COLS = set(RUS_TO_DB.values())
+
 # ===== 1C END =====
 
 
@@ -151,133 +170,298 @@ def db_fetchone(sql: str) -> Any:
 
 # ===== 3B START =====
 def ensure_schema() -> None:
-    # 3B: создаём таблицу (если нет) + добавляем нужные колонки (если их нет)
+    # 3B: создаём таблицу под наш фиксированный контракт колонок (если её нет)
     db_exec(
         f"""
         create table if not exists {TABLE_NAME} (
             id bigserial primary key,
-            report_ts timestamptz not null,
+
+            -- 3B: снимок отчёта (из Excel колонки Period -> period)
+            period timestamptz not null,
+
+            -- 3B: когда загрузили файл в БД
             loaded_ts timestamptz not null default now(),
+
+            -- 3B: имя исходного Excel-файла
             source_file text,
 
-            nomenclature text,
-            nomenclature_code text,
+            -- 3B: товар
+            item text,
+            item_code text,
             article text,
-            rank text,
-            reserve_qty numeric,
-            nonliquid boolean,
 
+            -- 3B: классификация/атрибуты
+            segment text,
+            pg text,                -- parent group / родитель сегмента
+            guz text,               -- группа управления запасами
+            gau text,               -- группа аналитического учета
+            manager text,
+            supplier text,
+
+            -- 3B: признаки
+            nonliq boolean,
+            n_descn text,
+            level_turns text,
+            rank_turns text,
+
+            -- 3B: метрики (qty / money)
+            av_stock_qty numeric,
+            sales_qty numeric,
+            revenue numeric,
+            curr_stock_qty numeric,
+
+            curr_stock_cost numeric,
+            sales_cost numeric,
+            av_stock_cost numeric,
+
+            turns_rub numeric,
+
+            free_stock_q_ty numeric,
+            free_stock_cost numeric,
+
+            rezerv_qty numeric,
+            rezerv_cost numeric,
+
+            margin numeric,
+            prof_pc numeric,
+            prof_stock numeric,
+
+            -- 3B: сырьё целиком (на всякий случай)
             payload jsonb,
 
-            constraint ux_raw_turnover_stock unique (report_ts, nomenclature_code)
+            -- 3B: уникальность строки в снимке (один товар в одном периоде)
+            constraint ux_raw_turnover_stock unique (period, item_code)
         );
         """
     )
 
-    # 3B: мягкие миграции (если таблицу создали раньше без части колонок)
+    # 3B: "мягкие миграции" (если таблица когда-то уже создавалась неполной)
+    #     Добавляем недостающие колонки без падения.
+    db_exec(f"alter table {TABLE_NAME} add column if not exists period timestamptz;")
     db_exec(f"alter table {TABLE_NAME} add column if not exists loaded_ts timestamptz not null default now();")
     db_exec(f"alter table {TABLE_NAME} add column if not exists source_file text;")
-    db_exec(f"alter table {TABLE_NAME} add column if not exists nomenclature text;")
-    db_exec(f"alter table {TABLE_NAME} add column if not exists nomenclature_code text;")
+
+    db_exec(f"alter table {TABLE_NAME} add column if not exists item text;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists item_code text;")
     db_exec(f"alter table {TABLE_NAME} add column if not exists article text;")
-    db_exec(f"alter table {TABLE_NAME} add column if not exists rank text;")
-    db_exec(f"alter table {TABLE_NAME} add column if not exists reserve_qty numeric;")
-    db_exec(f"alter table {TABLE_NAME} add column if not exists nonliquid boolean;")
+
+    db_exec(f"alter table {TABLE_NAME} add column if not exists segment text;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists pg text;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists guz text;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists gau text;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists manager text;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists supplier text;")
+
+    db_exec(f"alter table {TABLE_NAME} add column if not exists nonliq boolean;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists n_descn text;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists level_turns text;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists rank_turns text;")
+
+    db_exec(f"alter table {TABLE_NAME} add column if not exists av_stock_qty numeric;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists sales_qty numeric;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists revenue numeric;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists curr_stock_qty numeric;")
+
+    db_exec(f"alter table {TABLE_NAME} add column if not exists curr_stock_cost numeric;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists sales_cost numeric;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists av_stock_cost numeric;")
+
+    db_exec(f"alter table {TABLE_NAME} add column if not exists turns_rub numeric;")
+
+    db_exec(f"alter table {TABLE_NAME} add column if not exists free_stock_q_ty numeric;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists free_stock_cost numeric;")
+
+    db_exec(f"alter table {TABLE_NAME} add column if not exists rezerv_qty numeric;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists rezerv_cost numeric;")
+
+    db_exec(f"alter table {TABLE_NAME} add column if not exists margin numeric;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists prof_pc numeric;")
+    db_exec(f"alter table {TABLE_NAME} add column if not exists prof_stock numeric;")
+
     db_exec(f"alter table {TABLE_NAME} add column if not exists payload jsonb;")
+
+    # 3B: уникальный constraint тоже "мягко" не добавляется через IF NOT EXISTS,
+    #     поэтому создаём уникальный индекс, если его ещё нет (работает как constraint).
+    db_exec(
+        f"""
+        create unique index if not exists ux_raw_turnover_stock_period_code
+        on {TABLE_NAME} (period, item_code);
+        """
+    )
 # ===== 3B END =====
 
 
 # ===== 3C START =====
-def build_flat_fields(df: pd.DataFrame, i: int) -> Dict[str, Any]:
-    # 3C: вытаскиваем “плоские” поля (по известным именам колонок)
-    row = df.iloc[i]
-
-    # 3C: report_ts пытаемся взять из Period / Период
-    report_ts = None
-    if "Period" in df.columns:
-        report_ts = parse_timestamp(row.get("Period"))
-    if report_ts is None and "Период" in df.columns:
-        report_ts = parse_timestamp(row.get("Период"))
-
-    # 3C: остальные плоские — просто берём, где возможно
-    nomenclature = row.get("Номенклатура") if "Номенклатура" in df.columns else None
-    nomenclature_code = row.get("Номенклатура.Код") if "Номенклатура.Код" in df.columns else row.get("Номенклатура.Код ")
-    article = row.get("Номенклатура.Артикул ") if "Номенклатура.Артикул " in df.columns else row.get("Номенклатура.Артикул")
-    rank = row.get("Ранг") if "Ранг" in df.columns else None
-    reserve_qty = parse_numeric(row.get("Рзв")) if "Рзв" in df.columns else parse_numeric(row.get("Резерв"))
-
-    nonliquid = None
-    if "nonliquid" in df.columns:
-        nonliquid = parse_bool(row.get("nonliquid"))
-    if nonliquid is None and "Неликвид" in df.columns:
-        nonliquid = parse_bool(row.get("Неликвид"))
-
-    # 3C: приводим строки к str (чтобы не было сюрпризов от Excel-типов)
-    def s(v: Any) -> Optional[str]:
-        if v is None or pd.isna(v):
-            return None
-        return str(v)
-
-    return {
-        "report_ts": report_ts,
-        "nomenclature": s(nomenclature),
-        "nomenclature_code": s(nomenclature_code),
-        "article": s(article),
-        "rank": s(rank),
-        "reserve_qty": reserve_qty,
-        "nonliquid": nonliquid,
-    }
+def _s(v: Any) -> Optional[str]:
+    # 3C: безопасно приводим значение к строке (None/NaN -> None)
+    if v is None or pd.isna(v):
+        return None
+    return str(v)
 
 
 def upsert_dataframe(df: pd.DataFrame, source_file: str) -> Tuple[int, int]:
-    # 3C: грузим df в БД: все поля → payload, плоские → отдельные колонки
+    # 3C: основной загрузчик DataFrame -> Postgres (колонки + payload jsonb)
     if df.empty:
         return (0, 0)
 
-    # 3C: базовая проверка наличия Period
-    if "Period" not in df.columns and "Период" not in df.columns:
-        raise ValueError("No 'Period' (or 'Период') column found")
+    # 3C: 1) переименовываем колонки отчёта по контракту (русские -> DB-имена)
+    df = df.rename(columns=RUS_TO_DB)
+
+    # 3C: 2) проверяем, что контракт соблюдён (все обязательные колонки есть)
+    missing = sorted(list(REQUIRED_DB_COLS - set(df.columns)))
+    if missing:
+        raise ValueError(f"Missing required columns after rename: {missing}")
 
     rows: List[Tuple[Any, ...]] = []
 
     for i in range(len(df)):
-        flat = build_flat_fields(df, i)
-        payload = row_to_payload(df.iloc[i])
+        row = df.iloc[i]
 
-        # 3C: фильтры: должна быть дата и код (иначе уникальность/снимок ломаются)
-        if flat["report_ts"] is None:
+        # 3C: обязательные поля для уникальности снимка
+        period = parse_timestamp(row.get("period"))
+        item_code = _s(row.get("item_code"))
+
+        if period is None:
             continue
-        if not flat["nomenclature_code"]:
+        if not item_code:
             continue
+
+        payload = row_to_payload(row)
 
         rows.append(
             (
-                flat["report_ts"],
+                period,
                 source_file,
-                flat["nomenclature"],
-                flat["nomenclature_code"],
-                flat["article"],
-                flat["rank"],
-                flat["reserve_qty"],
-                flat["nonliquid"],
+
+                _s(row.get("item")),
+                item_code,
+                _s(row.get("article")),
+
+                _s(row.get("segment")),
+                _s(row.get("pg")),
+                _s(row.get("guz")),
+                _s(row.get("gau")),
+                _s(row.get("manager")),
+                _s(row.get("supplier")),
+
+                parse_bool(row.get("nonliq")),
+                _s(row.get("n_descn")),
+                _s(row.get("level_turns")),
+                _s(row.get("rank_turns")),
+
+                parse_numeric(row.get("av_stock_qty")),
+                parse_numeric(row.get("sales_qty")),
+                parse_numeric(row.get("revenue")),
+                parse_numeric(row.get("curr_stock_qty")),
+
+                parse_numeric(row.get("curr_stock_cost")),
+                parse_numeric(row.get("sales_cost")),
+                parse_numeric(row.get("av_stock_cost")),
+
+                parse_numeric(row.get("turns_rub")),
+
+                parse_numeric(row.get("free_stock_q_ty")),
+                parse_numeric(row.get("free_stock_cost")),
+
+                parse_numeric(row.get("rezerv_qty")),
+                parse_numeric(row.get("rezerv_cost")),
+
+                parse_numeric(row.get("margin")),
+                parse_numeric(row.get("prof_pc")),
+                parse_numeric(row.get("prof_stock")),
+
                 Jsonb(payload),
             )
         )
 
     sql = f"""
-    insert into {TABLE_NAME}
-        (report_ts, source_file, nomenclature, nomenclature_code, article, rank, reserve_qty, nonliquid, payload)
-    values
-        (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-    on conflict (report_ts, nomenclature_code)
+    insert into {TABLE_NAME} (
+        period, source_file,
+
+        item, item_code, article,
+
+        segment, pg, guz, gau, manager, supplier,
+
+        nonliq, n_descn, level_turns, rank_turns,
+
+        av_stock_qty, sales_qty, revenue, curr_stock_qty,
+
+        curr_stock_cost, sales_cost, av_stock_cost,
+
+        turns_rub,
+
+        free_stock_q_ty, free_stock_cost,
+
+        rezerv_qty, rezerv_cost,
+
+        margin, prof_pc, prof_stock,
+
+        payload
+    )
+    values (
+        %s, %s,
+
+        %s, %s, %s,
+
+        %s, %s, %s, %s, %s, %s,
+
+        %s, %s, %s, %s,
+
+        %s, %s, %s, %s,
+
+        %s, %s, %s,
+
+        %s,
+
+        %s, %s,
+
+        %s, %s,
+
+        %s, %s, %s,
+
+        %s
+    )
+    on conflict (period, item_code)
     do update set
         loaded_ts = now(),
         source_file = excluded.source_file,
-        nomenclature = excluded.nomenclature,
+
+        item = excluded.item,
         article = excluded.article,
-        rank = excluded.rank,
-        reserve_qty = excluded.reserve_qty,
-        nonliquid = excluded.nonliquid,
+
+        segment = excluded.segment,
+        pg = excluded.pg,
+        guz = excluded.guz,
+        gau = excluded.gau,
+        manager = excluded.manager,
+        supplier = excluded.supplier,
+
+        nonliq = excluded.nonliq,
+        n_descn = excluded.n_descn,
+        level_turns = excluded.level_turns,
+        rank_turns = excluded.rank_turns,
+
+        av_stock_qty = excluded.av_stock_qty,
+        sales_qty = excluded.sales_qty,
+        revenue = excluded.revenue,
+        curr_stock_qty = excluded.curr_stock_qty,
+
+        curr_stock_cost = excluded.curr_stock_cost,
+        sales_cost = excluded.sales_cost,
+        av_stock_cost = excluded.av_stock_cost,
+
+        turns_rub = excluded.turns_rub,
+
+        free_stock_q_ty = excluded.free_stock_q_ty,
+        free_stock_cost = excluded.free_stock_cost,
+
+        rezerv_qty = excluded.rezerv_qty,
+        rezerv_cost = excluded.rezerv_cost,
+
+        margin = excluded.margin,
+        prof_pc = excluded.prof_pc,
+        prof_stock = excluded.prof_stock,
+
         payload = excluded.payload
     ;
     """
