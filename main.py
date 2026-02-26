@@ -74,54 +74,123 @@ REQUIRED_DB_COLS = set(RUS_TO_DB.values())
 
 
 # ===== 2A START =====
-def to_snake_case(s: str) -> str:
-    # 2A: нормализуем имя колонки в snake_case (для payload)
-    s = str(s).strip()
-    s = s.replace(" ", "_")
-    s = s.replace(".", "_")
-    s = s.replace("-", "_")
+def to_snake_case(name: str) -> str:
+    """
+    2A: Нормализуем имя поля под payload:
+        - пробелы/точки/дефисы -> _
+        - убираем двойные __
+        - lower()
+    """
+    if name is None:
+        return ""
+    s = str(name).strip()
+
+    # заменяем частые разделители на "_"
+    for ch in [" ", ".", "-", "/", "\\", "(", ")", "%", "№", ","]:
+        s = s.replace(ch, "_")
+
+    # убираем подряд идущие "_"
     while "__" in s:
         s = s.replace("__", "_")
-    return s.lower()
+
+    return s.strip("_").lower()
 
 
 def parse_bool(v: Any) -> Optional[bool]:
-    # 2A: да/нет → bool
+    """
+    2A: Парсим флаговые значения.
+        Поддержка: 1/0, да/нет, true/false, yes/no, Y/N и т.п.
+        Пусто/NaN -> None
+    """
     if v is None:
         return None
-    if isinstance(v, bool):
-        return v
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+
     s = str(v).strip()
+    if s == "":
+        return None
+
     if s in TRUE_WORDS:
         return True
     if s in FALSE_WORDS:
         return False
+
+    # на всякий случай: "1.0"/"0.0"
+    if s == "1.0":
+        return True
+    if s == "0.0":
+        return False
+
     return None
 
 
 def parse_numeric(v: Any) -> Optional[float]:
-    # 2A: число (в т.ч. '1 234,56') → float
+    """
+    2A: Парсер чисел (NaN-safe).
+        ВАЖНО: NaN/пусто -> None (тогда в БД будет NULL, а sum() будет работать).
+        Поддержка строк: "1 234,56", "1234,56", "1 234,56" (неразрывный пробел),
+        а также варианты с точкой.
+    """
     if v is None:
         return None
+
+    # pandas/numpy NaN
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+
+    # уже число
     if isinstance(v, (int, float)):
+        # float('nan') тоже отловим
+        if isinstance(v, float) and (v != v):
+            return None
         return float(v)
+
     s = str(v).strip()
     if s == "":
         return None
-    s = s.replace(" ", "").replace(",", ".")
+
+    # удаляем пробелы/неразрывные пробелы, меняем запятую на точку
+    s = s.replace("\u00A0", "").replace("\u202F", "").replace(" ", "")
+    s = s.replace(",", ".")
+
     try:
-        return float(s)
+        num = float(s)
+        if num != num:  # NaN
+            return None
+        return num
     except Exception:
         return None
 
 
-def parse_timestamp(v: Any) -> Optional[pd.Timestamp]:
-    # 2A: дата/время → Timestamp
+def parse_timestamp(v: Any) -> Optional["datetime"]:
+    """
+    2A: Парсим дату/время для period/report_ts.
+        Поддержка: datetime, pandas Timestamp, строки.
+        Пусто/NaN -> None
+    """
+    if v is None:
+        return None
+
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+
+    # pandas Timestamp / datetime
     try:
         ts = pd.to_datetime(v, errors="coerce")
         if pd.isna(ts):
             return None
-        return ts
+        # делаем обычный datetime (timezone-aware/naive оставляем как есть)
+        return ts.to_pydatetime()
     except Exception:
         return None
 # ===== 2A END =====
