@@ -2,8 +2,8 @@
 import asyncio  # 1A: асинхронный запуск
 import logging  # 1A: логирование
 import os  # 1A: переменные окружения
-
 import tempfile  # 1A: временные папки/файлы
+from datetime import datetime  # 1A: НУЖНО для parse_timestamp/row_to_payload
 from pathlib import Path  # 1A: работа с путями
 from typing import Any, Dict, List, Optional, Tuple  # 1A: типы
 
@@ -74,6 +74,33 @@ REQUIRED_DB_COLS = set(RUS_TO_DB.values())
 
 
 # ===== 2A START =====
+def normalize_excel_header(name: Any) -> str:
+    """
+    2A: Нормализуем заголовок Excel перед сопоставлением с RUS_TO_DB.
+        Что делаем:
+        - None -> ""
+        - переводим в строку
+        - заменяем неразрывные пробелы на обычные
+        - убираем пробелы по краям
+        - схлопываем повторные пробелы внутри текста
+    """
+    if name is None:
+        return ""
+
+    s = str(name)
+
+    # заменяем "невидимые" пробелы Excel/1C на обычный пробел
+    s = s.replace("\u00A0", " ").replace("\u202F", " ")
+
+    # убираем пробелы по краям
+    s = s.strip()
+
+    # схлопываем двойные/тройные пробелы внутри текста
+    s = " ".join(s.split())
+
+    return s
+
+
 def to_snake_case(name: str) -> str:
     """
     2A: Нормализуем имя поля под payload:
@@ -429,13 +456,21 @@ def upsert_dataframe(df: pd.DataFrame, source_file: str) -> Tuple[int, int]:
     if df.empty:
         return (0, 0)
 
-    # 3C: 1) переименовываем колонки отчёта по контракту (русские -> DB-имена)
+    # 3C: 1) сначала чистим заголовки Excel от хвостовых/невидимых пробелов
+    df = df.copy()
+    df.columns = [normalize_excel_header(col) for col in df.columns]
+
+    # 3C: 2) переименовываем колонки отчёта по контракту (русские -> DB-имена)
     df = df.rename(columns=RUS_TO_DB)
 
-    # 3C: 2) проверяем, что контракт соблюдён (все обязательные колонки есть)
+    # 3C: 3) проверяем, что контракт соблюдён (все обязательные колонки есть)
     missing = sorted(list(REQUIRED_DB_COLS - set(df.columns)))
     if missing:
-        raise ValueError(f"Missing required columns after rename: {missing}")
+        actual_cols = list(df.columns)
+        raise ValueError(
+            f"Missing required columns after rename: {missing}. "
+            f"Actual columns after normalize/rename: {actual_cols}"
+        )
 
     rows: List[Tuple[Any, ...]] = []
 
