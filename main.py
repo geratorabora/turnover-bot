@@ -199,8 +199,15 @@ def parse_numeric(v: Any) -> Optional[float]:
 def parse_timestamp(v: Any) -> Optional["datetime"]:
     """
     2A: Парсим дату/время для period/report_ts.
-        Поддержка: datetime, pandas Timestamp, строки.
-        Пусто/NaN -> None
+        Поддержка:
+        - datetime / pandas Timestamp
+        - Excel serial date
+        - строки формата dd-mm-yyyy / dd.mm.yyyy / dd/mm/yyyy
+        - строки с временем
+
+        ВАЖНО:
+        Для строк сначала пробуем dayfirst=True,
+        чтобы '03-08-2026' читалось как 08.03.2026, а не 03.08.2026.
     """
     if v is None:
         return None
@@ -211,15 +218,37 @@ def parse_timestamp(v: Any) -> Optional["datetime"]:
     except Exception:
         pass
 
-    # pandas Timestamp / datetime
-    try:
-        ts = pd.to_datetime(v, errors="coerce")
-        if pd.isna(ts):
+    # если это уже Timestamp / datetime / Excel-date, pandas обычно понимает корректно
+    if not isinstance(v, str):
+        try:
+            ts = pd.to_datetime(v, errors="coerce")
+            if pd.isna(ts):
+                return None
+            return ts.to_pydatetime()
+        except Exception:
             return None
-        # делаем обычный datetime (timezone-aware/naive оставляем как есть)
-        return ts.to_pydatetime()
-    except Exception:
+
+    s = str(v).strip()
+    if s == "":
         return None
+
+    # сначала пробуем "день-месяц-год"
+    try:
+        ts = pd.to_datetime(s, errors="coerce", dayfirst=True)
+        if not pd.isna(ts):
+            return ts.to_pydatetime()
+    except Exception:
+        pass
+
+    # если не вышло - запасной вариант
+    try:
+        ts = pd.to_datetime(s, errors="coerce", dayfirst=False)
+        if not pd.isna(ts):
+            return ts.to_pydatetime()
+    except Exception:
+        pass
+
+    return None
 # ===== 2A END =====
 
 
