@@ -11,7 +11,7 @@ import pandas as pd  # 1A: чтение Excel
 import psycopg  # 1A: PostgreSQL
 from psycopg.types.json import Jsonb  # 1A: упаковка dict → jsonb для Postgres
 from aiogram import Bot, Dispatcher, F  # 1A: aiogram
-from aiogram.types import Message  # 1A: тип сообщений
+from aiogram.types import FSInputFile, Message  # 1A: тип сообщений и отправка готового файла
 from dotenv import load_dotenv  # 1A: .env
 # ===== 1A END =====
 
@@ -250,6 +250,51 @@ def parse_timestamp(v: Any) -> Optional["datetime"]:
 
     return None
 # ===== 2A END =====
+
+
+# ===== 2C START =====
+def build_report_filename(source_filename: str, df: pd.DataFrame) -> str:
+    """
+    2C: Формируем имя итогового отчёта по дате входного файла.
+        Основной вариант: первые 6 цифр в имени исходного файла = YYMMDD.
+        Запасной вариант: максимальная дата из колонки Period / Период.
+    """
+
+    report_date: Optional[datetime] = None
+
+    # 2C: пробуем достать дату из имени файла, например 260419_...xlsx -> 19.04.2026
+    digits = ""
+    for ch in source_filename:
+        if ch.isdigit():
+            digits += ch
+            if len(digits) == 6:
+                break
+        elif digits:
+            break
+
+    if len(digits) == 6:
+        try:
+            report_date = datetime.strptime(digits, "%y%m%d")
+        except Exception:
+            report_date = None
+
+    # 2C: если в имени даты нет, берём последнюю дату периода из содержимого Excel
+    if report_date is None:
+        period_col = "Period" if "Period" in df.columns else "Период" if "Период" in df.columns else None
+        if period_col is not None:
+            parsed_dates = [parse_timestamp(value) for value in df[period_col].dropna().tolist()]
+            parsed_dates = [value for value in parsed_dates if value is not None]
+            if parsed_dates:
+                report_date = max(parsed_dates)
+
+    # 2C: последний запасной вариант нужен только чтобы не уронить отправку файла из-за имени
+    if report_date is None:
+        report_date = datetime.now()
+
+    prefix = report_date.strftime("%y%m%d")
+    suffix = report_date.strftime("%d_%m_%y")
+    return f"{prefix}_оборачиваемость_и_остатки_на_основных_складах_на_{suffix}.xlsx"
+# ===== 2C END =====
 
 
 # ===== 2B START =====
@@ -736,15 +781,53 @@ def register_excel_upload(dp: Dispatcher) -> None:
                 ensure_schema()
                 total_rows, attempt_rows = upsert_dataframe(df, source_file=filename)
                 await message.answer(
-                    "✅ Загрузка завершена.\n"
+                    "✅ Загрузка в БД завершена.\n"
                     f"Строк в файле: {total_rows}\n"
                     f"Строк к вставке (после фильтров): {attempt_rows}\n"
-                    f"Колонок в файле: {len(cols)}"
+                    f"Колонок в файле: {len(cols)}\n"
+                    "Собираю turnover_pretty.xlsx..."
                 )
             except Exception as e:
                 await message.answer(f"❌ Ошибка загрузки в БД: {type(e).__name__}: {e}")
                 return
             # ===== 5C END =====
+
+            # ===== 5D START =====
+            try:
+                from turnover_pipeline import build_turnover_report
+            except Exception as e:
+                await message.answer(f"❌ Не смог подключить модуль сборки Excel: {type(e).__name__}: {e}")
+                return
+
+            try:
+                pipeline_result = build_turnover_report(
+                    database_url=DATABASE_URL or "",
+                    work_dir=Path(tmp_dir),
+                    source_detail_path=tmp_path,
+                )
+            except FileNotFoundError as e:
+                await message.answer(f"❌ SQL-файл выгрузки не найден: {e}")
+                return
+            except psycopg.OperationalError as e:
+                await message.answer(f"❌ Ошибка подключения к БД при SQL-выгрузке: {type(e).__name__}: {e}")
+                return
+            except Exception as e:
+                await message.answer(f"❌ Ошибка сборки turnover_pretty.xlsx: {type(e).__name__}: {e}")
+                return
+
+            try:
+                report_filename = build_report_filename(filename, df)
+                await message.answer_document(
+                    FSInputFile(pipeline_result.xlsx_path, filename=report_filename),
+                    caption=(
+                        f"✅ Готово: {report_filename}\n"
+                        f"Строк в SQL-выгрузке: {pipeline_result.exported_rows}"
+                    ),
+                )
+            except Exception as e:
+                await message.answer(f"❌ Готовый файл создан, но не смог отправить его в Telegram: {type(e).__name__}: {e}")
+                return
+            # ===== 5D END =====
 # ===== 5A END =====
 
 
