@@ -795,6 +795,7 @@ def add_toc_sheet(wb) -> None:
     ws["B3"] = "Описание"
     ws["A3"].font = Font(bold=True)
     ws["B3"].font = Font(bold=True)
+    ws["B3"].alignment = Alignment(vertical="center", wrap_text=True)
 
     # 6C: Описания для всех листов отчёта
     descriptions = {
@@ -837,7 +838,11 @@ def add_toc_sheet(wb) -> None:
         cell.hyperlink = f"#'{sheet_name}'!A1"  # 6C: делаем внутреннюю ссылку на лист
         cell.style = "Hyperlink"  # 6C: применяем стиль гиперссылки
 
-        ws.cell(current_row, 2).value = descriptions.get(sheet_name, "")  # 6C: пишем описание листа
+        desc_cell = ws.cell(current_row, 2)  # 6C: ячейка под описание листа
+        desc_cell.value = descriptions.get(sheet_name, "")  # 6C: пишем описание листа
+        desc_cell.alignment = Alignment(vertical="top", wrap_text=True)  # 6C: включаем перенос по словам
+        if sheet_name == SHEET_DETAIL_LAST_WEEK:  # 6C: описание детализации делаем жирным
+            desc_cell.font = Font(bold=True)  # 6C: выделяем прикладное описание
 
         current_row += 1  # 6C: переходим на следующую строку
 
@@ -885,6 +890,14 @@ def add_last_week_detail_sheet(wb, source_detail_path: Path) -> None:
         "Рент. %",
         "Рент.Тов.Зап",
     }
+    money_columns = {  # 6D: колонки, где хотим включить отображение с разделением разрядов
+        "Конечный остаток (товары)",
+        "Себестоимость (из отч. себ)",
+        "Свободный остаток текущий",
+        "Себестоимость свободного остатка",
+        "Рзв",
+        "Себ.Рзв",
+    }
 
     # 6D: Копируем значения ячеек построчно и поколоночно
     for row in source_ws.iter_rows():  # 6D: идём по всем строкам исходного листа
@@ -924,20 +937,28 @@ def add_last_week_detail_sheet(wb, source_detail_path: Path) -> None:
     header_font = Font(bold=True)  # 6D: шрифт шапки
     header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)  # 6D: переносы в шапке
     data_align = Alignment(vertical="top", wrap_text=False)  # 6D: обычное выравнивание данных
+    fmt_int_thousands = "#,##0"  # 6D: формат с разделением разрядов для стоимостных и количественных колонок
 
     for col_num in range(1, target_ws.max_column + 1):  # 6D: идём по всем колонкам после удаления
         col_letter = target_ws.cell(1, col_num).column_letter  # 6D: получаем букву колонки
         target_ws.column_dimensions[col_letter].width = 10  # 6D: ставим одинаковую максимальную ширину
 
         if col_num == 1:  # 6D: колонку "Номенклатура" делаем шире остальных
-            target_ws.column_dimensions[col_letter].width = 20  # 6D: даём больше места под название товара
+            target_ws.column_dimensions[col_letter].width = 30  # 6D: даём больше места под название товара
 
         header_cell = target_ws.cell(1, col_num)  # 6D: ячейка заголовка
         header_cell.font = header_font  # 6D: делаем заголовок жирным
         header_cell.alignment = header_align  # 6D: включаем переносы по словам
+        header_value = header_cell.value.strip() if isinstance(header_cell.value, str) else header_cell.value  # 6D: нормализуем имя заголовка
+
+        if header_value == "Period":  # 6D: колонку периода скрываем, но не удаляем
+            target_ws.column_dimensions[col_letter].hidden = True  # 6D: скрываем колонку периода
 
         for row_num in range(2, target_ws.max_row + 1):  # 6D: форматируем строки данных
-            target_ws.cell(row_num, col_num).alignment = data_align  # 6D: оставляем данные без переноса
+            data_cell = target_ws.cell(row_num, col_num)  # 6D: текущая ячейка данных
+            data_cell.alignment = data_align  # 6D: оставляем данные без переноса
+            if header_value in money_columns:  # 6D: для нужных колонок включаем разделение разрядов
+                data_cell.number_format = fmt_int_thousands  # 6D: применяем числовой формат
 
     target_ws.auto_filter.ref = f"A1:{target_ws.cell(1, target_ws.max_column).column_letter}{target_ws.max_row}"  # 6D: включаем фильтр на весь диапазон
     target_ws.row_dimensions[1].height = 36  # 6D: даём шапке место под переносы
