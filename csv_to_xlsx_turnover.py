@@ -808,7 +808,7 @@ def add_toc_sheet(wb) -> None:
         SHEET_CHART_TURNS: "График динамики оборачиваемости по продукт-группам.",
         SHEET_CHART_SLOW: "График динамики низкооборачиваемых товаров по продукт-группам.",
         SHEET_CHART_NONLIQ: "График динамики остатков неликвидных товаров по продукт-группам.",
-        SHEET_DETAIL_LAST_WEEK: "Детализация до номенклатуры по последней неделе из исходного файла 1С, без нижней строки итогов.",
+        SHEET_DETAIL_LAST_WEEK: "Детализация до номенклатуры по последней неделе. Если нужно посмотреть остаток и свободный в себестоимости в разрезе сегмента, поставщика, направления или менеджера, это можно сделать тут.",
     }
 
     # 6C: Порядок листов, который хотим показать в оглавлении
@@ -838,16 +838,6 @@ def add_toc_sheet(wb) -> None:
         cell.style = "Hyperlink"  # 6C: применяем стиль гиперссылки
 
         ws.cell(current_row, 2).value = descriptions.get(sheet_name, "")  # 6C: пишем описание листа
-
-        if sheet_name == SHEET_DETAIL_LAST_WEEK:  # 6C: для детализации добавляем пояснение отдельной строкой
-            current_row += 1  # 6C: переходим на строку ниже описания листа
-            detail_note = ws.cell(current_row, 2)  # 6C: ячейка под расширенное пояснение
-            detail_note.value = (
-                "Если Вы хотите посмотреть остатки в разрезе товаров с фильтром по сегменту, "
-                "оборачиваемости, неликвидам или другим признакам то это сюда"
-            )  # 6C: прикладное пояснение для пользователя
-            detail_note.font = Font(bold=True)  # 6C: делаем пояснение жирным
-            detail_note.alignment = Alignment(vertical="top", wrap_text=True)  # 6C: разрешаем перенос по словам
 
         current_row += 1  # 6C: переходим на следующую строку
 
@@ -938,6 +928,9 @@ def add_last_week_detail_sheet(wb, source_detail_path: Path) -> None:
     for col_num in range(1, target_ws.max_column + 1):  # 6D: идём по всем колонкам после удаления
         col_letter = target_ws.cell(1, col_num).column_letter  # 6D: получаем букву колонки
         target_ws.column_dimensions[col_letter].width = 10  # 6D: ставим одинаковую максимальную ширину
+
+        if col_num == 1:  # 6D: колонку "Номенклатура" делаем шире остальных
+            target_ws.column_dimensions[col_letter].width = 20  # 6D: даём больше места под название товара
 
         header_cell = target_ws.cell(1, col_num)  # 6D: ячейка заголовка
         header_cell.font = header_font  # 6D: делаем заголовок жирным
