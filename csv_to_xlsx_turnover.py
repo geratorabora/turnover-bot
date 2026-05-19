@@ -839,11 +839,22 @@ def add_toc_sheet(wb) -> None:
 
         ws.cell(current_row, 2).value = descriptions.get(sheet_name, "")  # 6C: пишем описание листа
 
+        if sheet_name == SHEET_DETAIL_LAST_WEEK:  # 6C: для детализации добавляем пояснение отдельной строкой
+            current_row += 1  # 6C: переходим на строку ниже описания листа
+            detail_note = ws.cell(current_row, 2)  # 6C: ячейка под расширенное пояснение
+            detail_note.value = (
+                "Если Вы хотите посмотреть остатки в разрезе товаров с фильтром по сегменту, "
+                "оборачиваемости, неликвидам или другим признакам то это сюда"
+            )  # 6C: прикладное пояснение для пользователя
+            detail_note.font = Font(bold=True)  # 6C: делаем пояснение жирным
+            detail_note.alignment = Alignment(vertical="top", wrap_text=True)  # 6C: разрешаем перенос по словам
+
         current_row += 1  # 6C: переходим на следующую строку
 
     # 6C: Немного форматируем ширины колонок
     ws.column_dimensions["A"].width = 38
     ws.column_dimensions["B"].width = 120
+    ws.column_dimensions["C"].width = 4
 
     # 6C: Закрепляем верх таблицы
     ws.freeze_panes = "A4"
@@ -873,6 +884,17 @@ def add_last_week_detail_sheet(wb, source_detail_path: Path) -> None:
         del wb[SHEET_DETAIL_LAST_WEEK]
 
     target_ws = wb.create_sheet(SHEET_DETAIL_LAST_WEEK)  # 6D: создаём новый лист в итоговом файле
+    columns_to_drop = {  # 6D: набор колонок, которые на листе детализации не нужны
+        "Номенклатура.Код",
+        "Средний остаток, шт",
+        "Расход, шт",
+        "Выручка",
+        "Себестоимость продаж за период",
+        "Себестоимость среднего остатка",
+        "Вал.Пр",
+        "Рент. %",
+        "Рент.Тов.Зап",
+    }
 
     # 6D: Копируем значения ячеек построчно и поколоночно
     for row in source_ws.iter_rows():  # 6D: идём по всем строкам исходного листа
@@ -899,22 +921,33 @@ def add_last_week_detail_sheet(wb, source_detail_path: Path) -> None:
         if any(marker in row_values_as_text for marker in ["итог", "итоги", "итого", "всего"]):
             target_ws.delete_rows(last_row, 1)  # 6D: удаляем последнюю строку
 
-    # 6D: Подбираем ширину колонок по содержимому
-    for col_num in range(1, target_ws.max_column + 1):  # 6D: идём по всем колонкам
-        max_len = 0  # 6D: сюда собираем максимальную длину текста в колонке
+    header_values = [target_ws.cell(1, col_num).value for col_num in range(1, target_ws.max_column + 1)]  # 6D: читаем заголовки
+    cols_to_delete = [  # 6D: вычисляем номера колонок, которые нужно убрать
+        idx
+        for idx, header_value in enumerate(header_values, start=1)
+        if isinstance(header_value, str) and header_value.strip() in columns_to_drop
+    ]
+
+    for col_num in reversed(cols_to_delete):  # 6D: удаляем справа налево, чтобы индексы не сдвигались
+        target_ws.delete_cols(col_num, 1)  # 6D: физически удаляем ненужную колонку
+
+    header_font = Font(bold=True)  # 6D: шрифт шапки
+    header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)  # 6D: переносы в шапке
+    data_align = Alignment(vertical="top", wrap_text=False)  # 6D: обычное выравнивание данных
+
+    for col_num in range(1, target_ws.max_column + 1):  # 6D: идём по всем колонкам после удаления
         col_letter = target_ws.cell(1, col_num).column_letter  # 6D: получаем букву колонки
+        target_ws.column_dimensions[col_letter].width = 10  # 6D: ставим одинаковую максимальную ширину
 
-        for row_num in range(1, target_ws.max_row + 1):  # 6D: идём по всем строкам колонки
-            cell_value = target_ws.cell(row_num, col_num).value  # 6D: читаем значение ячейки
-            if cell_value is None:
-                continue  # 6D: пустые ячейки пропускаем
+        header_cell = target_ws.cell(1, col_num)  # 6D: ячейка заголовка
+        header_cell.font = header_font  # 6D: делаем заголовок жирным
+        header_cell.alignment = header_align  # 6D: включаем переносы по словам
 
-            cell_len = len(str(cell_value))  # 6D: длина текста в ячейке
-            if cell_len > max_len:
-                max_len = cell_len  # 6D: обновляем максимум
+        for row_num in range(2, target_ws.max_row + 1):  # 6D: форматируем строки данных
+            target_ws.cell(row_num, col_num).alignment = data_align  # 6D: оставляем данные без переноса
 
-        target_ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 40)  # 6D: задаём разумную ширину
-
+    target_ws.auto_filter.ref = f"A1:{target_ws.cell(1, target_ws.max_column).column_letter}{target_ws.max_row}"  # 6D: включаем фильтр на весь диапазон
+    target_ws.row_dimensions[1].height = 36  # 6D: даём шапке место под переносы
     target_ws.freeze_panes = "A2"  # 6D: закрепляем верхнюю строку
 # ===== 6D END =====
 
