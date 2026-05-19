@@ -939,7 +939,7 @@ def add_last_week_detail_sheet(wb, source_detail_path: Path) -> None:
     data_align = Alignment(vertical="top", wrap_text=False)  # 6D: обычное выравнивание данных
     fmt_int_thousands = "#,##0"  # 6D: формат с разделением разрядов для стоимостных и количественных колонок
     odd_row_fill = PatternFill(fill_type="solid", fgColor="FFFFFF")  # 6D: белая заливка для нечётных строк данных
-    even_row_fill = PatternFill(fill_type="solid", fgColor="F3F3F3")  # 6D: бледно-серая заливка для чётных строк данных
+    even_row_fill = PatternFill(fill_type="solid", fgColor="E7E7E7")  # 6D: более заметная светло-серая заливка для чётных строк данных
 
     for col_num in range(1, target_ws.max_column + 1):  # 6D: идём по всем колонкам после удаления
         col_letter = target_ws.cell(1, col_num).column_letter  # 6D: получаем букву колонки
