@@ -20,17 +20,19 @@ OUTPUT_XLSX_NAME = "turnover_pretty.xlsx"  # 1B: имя выходного Excel
 SOURCE_DETAIL_XLSX_NAME = "96 для показателей КС (XLSX).xlsx"  # 1B: исходный файл 1С с детализацией по номенклатуре
 
 SHEET_TOC = "Оглавление"  # 1B: первый лист с навигацией по файлу
-SHEET_SUMMARY = "Итоги графики"  # 1B: лист с тремя общими графиками
+SHEET_SUMMARY = "Итоги графики"  # 1B: лист с итоговыми графиками
 
 SHEET_ALL = "общее"  # 1B: общий лист
 SHEET_STOCK = "Общий остаток"  # 1B: лист по остаткам
 SHEET_TURNS = "Оборачиваемость"  # 1B: лист по оборачиваемости
-SHEET_SLOW = "Остаток НО (меньше2)"  # 1B: лист по низкооборачиваемым остаткам
+SHEET_SLOW = "Остаток НОТ"  # 1B: лист по низкооборачиваемым товарам
+SHEET_NONLIQ = "Остаток неликвидов"  # 1B: лист по неликвидам
 SHEET_DETAIL_LAST_WEEK = "детализация последняя неделя"  # 1B: последний лист с исходной детализацией, имя <= 31 символа
 
 SHEET_CHART_STOCK = "График общий остаток"  # 1B: график остатков
 SHEET_CHART_TURNS = "График Оборачиваемость"  # 1B: график оборачиваемости
-SHEET_CHART_SLOW = "График остаток НО (меньше2)"  # 1B: график низкооборачиваемых
+SHEET_CHART_SLOW = "График остаток НОТ"  # 1B: график низкооборачиваемых
+SHEET_CHART_NONLIQ = "График остаток неликвидов"  # 1B: график неликвидов
 # ===== 1B END =====
 
 
@@ -74,6 +76,7 @@ def load_long_csv(csv_path: Path, sep: str, encoding: str) -> pd.DataFrame:
         "av_stock_cost",
         "turns_rub",
         "slow_stock_lt2",
+        "nonliq_stock",
     }  # 2B: обязательные колонки нового длинного CSV
 
     missing = sorted(list(required_cols - set(df.columns)))  # 2B: проверяем, все ли нужные колонки есть
@@ -137,6 +140,7 @@ def load_long_csv(csv_path: Path, sep: str, encoding: str) -> pd.DataFrame:
     df["av_stock_cost"] = normalize_numeric(df["av_stock_cost"])  # 2B: средний остаток -> число
     df["turns_rub"] = normalize_numeric(df["turns_rub"])  # 2B: оборачиваемость -> число
     df["slow_stock_lt2"] = normalize_numeric(df["slow_stock_lt2"])  # 2B: низкооборачиваемый остаток -> число
+    df["nonliq_stock"] = normalize_numeric(df["nonliq_stock"])  # 2B: неликвидный остаток -> число
 
     df = df.sort_values(
         by=["week_num", "pg", "lvl", "pg_segment"],
@@ -253,11 +257,12 @@ def build_all_sheet(
     stock_df: pd.DataFrame,
     turns_df: pd.DataFrame,
     slow_df: pd.DataFrame,
+    nonliq_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """
     4B: Собираем общий лист:
         pg_segment + чередование
-        Остаток w01, Об. руб w01, Низкооб w01, ...
+        Остаток w01, Об. руб w01, Низкооб w01, Неликвиды w01, ...
     """
 
     result_df = stock_df[["pg_segment"]].copy()  # 4B: начинаем с первой колонки
@@ -265,6 +270,7 @@ def build_all_sheet(
     stock_cols = [c for c in stock_df.columns if c != "pg_segment"]  # 4B: колонки остатка
     turns_cols = [c for c in turns_df.columns if c != "pg_segment"]  # 4B: колонки оборачиваемости
     slow_cols = [c for c in slow_df.columns if c != "pg_segment"]  # 4B: колонки низкооборачиваемых
+    nonliq_cols = [c for c in nonliq_df.columns if c != "pg_segment"]  # 4B: колонки неликвидов
 
     week_labels = []  # 4B: сюда соберём список недельных хвостов вроде w01, w02
 
@@ -277,6 +283,7 @@ def build_all_sheet(
         stock_col = f"Остаток {week_label}"  # 4B: имя колонки остатка
         turns_col = f"Об. руб {week_label}"  # 4B: имя колонки оборачиваемости
         slow_col = f"Низкооб {week_label}"  # 4B: имя колонки низкооборачиваемых
+        nonliq_col = f"Неликвиды {week_label}"  # 4B: имя колонки неликвидов
 
         if stock_col in stock_df.columns:  # 4B: если колонка есть
             result_df[stock_col] = stock_df[stock_col]  # 4B: добавляем её
@@ -284,6 +291,8 @@ def build_all_sheet(
             result_df[turns_col] = turns_df[turns_col]  # 4B: добавляем её
         if slow_col in slow_df.columns:  # 4B: если колонка есть
             result_df[slow_col] = slow_df[slow_col]  # 4B: добавляем её
+        if nonliq_col in nonliq_cols:  # 4B: если колонка есть
+            result_df[nonliq_col] = nonliq_df[nonliq_col]  # 4B: добавляем её
 
     return result_df  # 4B: возвращаем общий лист
 # ===== 4B END =====
@@ -297,6 +306,7 @@ def build_summary_metrics_table(df_long: pd.DataFrame, week_map: Dict[int, str])
     - week_label
     - total_stock
     - total_slow
+    - total_nonliq
     - total_turns
 
     ВАЖНО:
@@ -313,6 +323,7 @@ def build_summary_metrics_table(df_long: pd.DataFrame, week_map: Dict[int, str])
         .agg(
             total_stock=("stock_cost", "sum"),
             total_slow=("slow_stock_lt2", "sum"),
+            total_nonliq=("nonliq_stock", "sum"),
             total_sales=("sales_cost", "sum"),
             total_av_stock=("av_stock_cost", "sum"),
         )
@@ -328,7 +339,7 @@ def build_summary_metrics_table(df_long: pd.DataFrame, week_map: Dict[int, str])
     summary_df["week_label"] = summary_df["week_num"].apply(lambda x: week_map[int(x)])  # 4C: делаем подпись недели вида w01
 
     summary_df = summary_df[
-        ["week_num", "week_dt", "week_label", "total_stock", "total_slow", "total_turns"]
+        ["week_num", "week_dt", "week_label", "total_stock", "total_slow", "total_nonliq", "total_turns"]
     ].copy()  # 4C: оставляем только нужные колонки
 
     return summary_df  # 4C: возвращаем итоговую маленькую таблицу
@@ -342,6 +353,7 @@ def write_data_sheets(
     stock_df: pd.DataFrame,
     turns_df: pd.DataFrame,
     slow_df: pd.DataFrame,
+    nonliq_df: pd.DataFrame,
 ) -> None:
     """
     5A: Записываем табличные листы в Excel.
@@ -352,6 +364,7 @@ def write_data_sheets(
         stock_df.to_excel(writer, index=False, sheet_name=SHEET_STOCK)  # 5A: лист остатков
         turns_df.to_excel(writer, index=False, sheet_name=SHEET_TURNS)  # 5A: лист оборачиваемости
         slow_df.to_excel(writer, index=False, sheet_name=SHEET_SLOW)  # 5A: лист низкооборачиваемых
+        nonliq_df.to_excel(writer, index=False, sheet_name=SHEET_NONLIQ)  # 5A: лист неликвидов
 # ===== 5A END =====
 
 
@@ -369,6 +382,7 @@ def format_worksheet(ws, first_col_width: float = 52) -> None:
     header_font = Font(bold=True)  # 5B: жирный шрифт заголовка
     pg_font = Font(bold=True)  # 5B: жирный шрифт для строк PG
     base_align = Alignment(vertical="center", wrap_text=False)  # 5B: обычное выравнивание
+    header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)  # 5B: заголовки переносим по словам
     seg_align = Alignment(vertical="center", indent=2)  # 5B: выравнивание с отступом для сегментов
     pg_align = Alignment(vertical="center")  # 5B: выравнивание для PG
     pg_fill = PatternFill(fill_type="solid", fgColor="EDEDED")  # 5B: светло-серая заливка для строк PG
@@ -381,7 +395,7 @@ def format_worksheet(ws, first_col_width: float = 52) -> None:
 
     for cell in ws[1]:  # 5B: форматируем строку заголовка
         cell.font = header_font  # 5B: делаем жирной
-        cell.alignment = base_align  # 5B: ставим выравнивание
+        cell.alignment = header_align  # 5B: включаем переносы по словам
 
     fmt_int_thousands = "#,##0"  # 5B: формат для целых значений
     fmt_turns = "0.00"  # 5B: формат для оборачиваемости
@@ -402,10 +416,17 @@ def format_worksheet(ws, first_col_width: float = 52) -> None:
             for row_num in range(2, ws.max_row + 1):  # 5B: форматируем значения
                 ws.cell(row_num, col_idx[header]).number_format = fmt_int_thousands  # 5B: формат целого
 
+        elif re.match(r"^Неликвиды w\d+$", header):  # 5B: если колонка неликвидов
+            ws.column_dimensions[col_letter].width = 14  # 5B: ставим ширину
+            for row_num in range(2, ws.max_row + 1):  # 5B: форматируем значения
+                ws.cell(row_num, col_idx[header]).number_format = fmt_int_thousands  # 5B: формат целого
+
         elif re.match(r"^Об\. руб w\d+$", header):  # 5B: если колонка оборачиваемости
             ws.column_dimensions[col_letter].width = 12  # 5B: ставим ширину
             for row_num in range(2, ws.max_row + 1):  # 5B: форматируем значения
                 ws.cell(row_num, col_idx[header]).number_format = fmt_turns  # 5B: формат дробного
+
+    ws.row_dimensions[1].height = 32  # 5B: даём шапке место под переносы
 
     ws.column_dimensions["A"].width = first_col_width  # 5B: делаем первую колонку широкой
 
@@ -537,10 +558,11 @@ def add_line_chart_sheet(
 # ===== 6B START =====
 def add_summary_dashboard_sheet(wb, summary_df: pd.DataFrame) -> None:
     """
-    6B: Создаём лист с тремя общими графиками:
+    6B: Создаём лист с четырьмя общими графиками:
     1. динамика общего остатка
-    2. динамика общего низкооборачиваемого остатка
-    3. динамика общей оборачиваемости
+    2. динамика общего остатка низкооборачиваемых товаров
+    3. динамика общего остатка неликвидов
+    4. динамика общей оборачиваемости
 
     На листе также оставляем небольшую служебную таблицу-источник данных.
 
@@ -554,29 +576,35 @@ def add_summary_dashboard_sheet(wb, summary_df: pd.DataFrame) -> None:
     # 6B: Пишем служебную таблицу, от которой будут строиться графики
     ws["A1"] = "Неделя"
     ws["B1"] = "Общий остаток"
-    ws["C1"] = "Общий НО"
-    ws["D1"] = "Общая оборачиваемость"
+    ws["C1"] = "Общий остаток низкооборачиваемых товаров (НОТ)"
+    ws["D1"] = "Общий остаток неликвидов"
+    ws["E1"] = "Общая оборачиваемость"
 
     for idx, row in summary_df.iterrows():  # 6B: переносим данные по неделям в лист
         excel_row = idx + 2  # 6B: данные начинаются со 2-й строки
         ws.cell(excel_row, 1).value = row["week_label"]  # 6B: подпись недели
         ws.cell(excel_row, 2).value = row["total_stock"]  # 6B: общий остаток
-        ws.cell(excel_row, 3).value = row["total_slow"]  # 6B: общий НО
-        ws.cell(excel_row, 4).value = row["total_turns"]  # 6B: общая оборачиваемость
+        ws.cell(excel_row, 3).value = row["total_slow"]  # 6B: общий НОТ
+        ws.cell(excel_row, 4).value = row["total_nonliq"]  # 6B: общий неликвид
+        ws.cell(excel_row, 5).value = row["total_turns"]  # 6B: общая оборачиваемость
 
     # 6B: Форматируем служебную таблицу
     for cell in ws[1]:
         cell.font = Font(bold=True)
+        cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
 
     for row_num in range(2, ws.max_row + 1):
         ws.cell(row_num, 2).number_format = '#,##0'
         ws.cell(row_num, 3).number_format = '#,##0'
-        ws.cell(row_num, 4).number_format = '0.00'
+        ws.cell(row_num, 4).number_format = '#,##0'
+        ws.cell(row_num, 5).number_format = '0.00'
 
     ws.column_dimensions["A"].width = 10
     ws.column_dimensions["B"].width = 16
-    ws.column_dimensions["C"].width = 16
+    ws.column_dimensions["C"].width = 24
     ws.column_dimensions["D"].width = 18
+    ws.column_dimensions["E"].width = 18
+    ws.row_dimensions[1].height = 40
 
     categories = Reference(
         ws,
@@ -624,7 +652,8 @@ def add_summary_dashboard_sheet(wb, summary_df: pd.DataFrame) -> None:
     major_unit_turns = 0.25  # 6B: шаг по оси Y для оборачиваемости = 0.25
 
     stock_lower, stock_upper = calc_axis_bounds(summary_df["total_stock"], major_unit_rub)  # 6B: границы для общего остатка
-    slow_lower, slow_upper = calc_axis_bounds(summary_df["total_slow"], major_unit_rub)  # 6B: границы для общего НО
+    slow_lower, slow_upper = calc_axis_bounds(summary_df["total_slow"], major_unit_rub)  # 6B: границы для общего НОТ
+    nonliq_lower, nonliq_upper = calc_axis_bounds(summary_df["total_nonliq"], major_unit_rub)  # 6B: границы для общего неликвида
     turns_lower, turns_upper = calc_axis_bounds(summary_df["total_turns"], major_unit_turns)  # 6B: границы для общей оборачиваемости
 
     # ---------- график 1: общий остаток ----------
@@ -654,11 +683,11 @@ def add_summary_dashboard_sheet(wb, summary_df: pd.DataFrame) -> None:
     chart_stock.y_axis.scaling.max = stock_upper  # 6B: верхняя граница оси
     chart_stock.y_axis.numFmt = '0,," М руб"'  # 6B: подписи в миллионах рублей
 
-    ws.add_chart(chart_stock, "F2")
+    ws.add_chart(chart_stock, "G2")
 
-    # ---------- график 2: общий НО ----------
+    # ---------- график 2: общий НОТ ----------
     chart_slow = LineChart()
-    chart_slow.title = "Динамика общего НО"
+    chart_slow.title = "Динамика остатка низкооборачиваемых товаров (НОТ)"
     chart_slow.style = 2
     chart_slow.height = 10
     chart_slow.width = 24
@@ -683,9 +712,38 @@ def add_summary_dashboard_sheet(wb, summary_df: pd.DataFrame) -> None:
     chart_slow.y_axis.scaling.max = slow_upper  # 6B: верхняя граница оси
     chart_slow.y_axis.numFmt = '0,," М руб"'  # 6B: подписи в миллионах рублей
 
-    ws.add_chart(chart_slow, "F22")
+    ws.add_chart(chart_slow, "G22")
 
-    # ---------- график 3: общая оборачиваемость ----------
+    # ---------- график 3: общий неликвид ----------
+    chart_nonliq = LineChart()
+    chart_nonliq.title = "Динамика остатка неликвидов"
+    chart_nonliq.style = 2
+    chart_nonliq.height = 10
+    chart_nonliq.width = 24
+    chart_nonliq.legend = None
+
+    data_nonliq = Reference(
+        ws,
+        min_col=4,
+        min_row=1,
+        max_col=4,
+        max_row=ws.max_row,
+    )
+    chart_nonliq.add_data(data_nonliq, titles_from_data=True)
+    chart_nonliq.set_categories(categories)
+
+    chart_nonliq.x_axis.delete = False  # 6B: ось X показываем
+    chart_nonliq.y_axis.delete = False  # 6B: ось Y показываем
+    chart_nonliq.x_axis.title = "Недели"  # 6B: подпись оси X
+    chart_nonliq.y_axis.title = "М руб"  # 6B: подпись оси Y
+    chart_nonliq.y_axis.majorUnit = major_unit_rub  # 6B: шаг по оси Y = 25 млн
+    chart_nonliq.y_axis.scaling.min = nonliq_lower  # 6B: нижняя граница = 70% от минимума
+    chart_nonliq.y_axis.scaling.max = nonliq_upper  # 6B: верхняя граница оси
+    chart_nonliq.y_axis.numFmt = '0,," М руб"'  # 6B: подписи в миллионах рублей
+
+    ws.add_chart(chart_nonliq, "G42")
+
+    # ---------- график 4: общая оборачиваемость ----------
     chart_turns = LineChart()
     chart_turns.title = "Динамика общей оборачиваемости"
     chart_turns.style = 2
@@ -695,9 +753,9 @@ def add_summary_dashboard_sheet(wb, summary_df: pd.DataFrame) -> None:
 
     data_turns = Reference(
         ws,
-        min_col=4,
+        min_col=5,
         min_row=1,
-        max_col=4,
+        max_col=5,
         max_row=ws.max_row,
     )
     chart_turns.add_data(data_turns, titles_from_data=True)
@@ -712,7 +770,7 @@ def add_summary_dashboard_sheet(wb, summary_df: pd.DataFrame) -> None:
     chart_turns.y_axis.scaling.max = turns_upper  # 6B: верхняя граница оси
     chart_turns.y_axis.numFmt = '0.00'  # 6B: формат чисел по оси Y
 
-    ws.add_chart(chart_turns, "F42")
+    ws.add_chart(chart_turns, "G62")
 # ===== 6B END =====
 
 # ===== 6C START =====
@@ -740,14 +798,16 @@ def add_toc_sheet(wb) -> None:
 
     # 6C: Описания для всех листов отчёта
     descriptions = {
-        SHEET_SUMMARY: "Три итоговых графика: динамика общего остатка, общего НО и общей оборачиваемости по неделям.",
-        SHEET_ALL: "Сводная таблица по всем продукт-группам и сегментам: остаток, оборачиваемость и НО по всем неделям.",
+        SHEET_SUMMARY: "Четыре итоговых графика: динамика общего остатка, НОТ, неликвидов и общей оборачиваемости по неделям.",
+        SHEET_ALL: "Сводная таблица по всем продукт-группам и сегментам: остаток, оборачиваемость, НОТ и неликвиды по всем неделям.",
         SHEET_STOCK: "Таблица только по общему остатку в разрезе продукт-групп и сегментов.",
         SHEET_TURNS: "Таблица только по оборачиваемости в разрезе продукт-групп и сегментов.",
-        SHEET_SLOW: "Таблица только по низкооборачиваемым остаткам (оборачиваемость меньше 2).",
+        SHEET_SLOW: "Таблица только по низкооборачиваемым товарам (НОТ).",
+        SHEET_NONLIQ: "Таблица только по остаткам неликвидных товаров.",
         SHEET_CHART_STOCK: "График динамики общего остатка по продукт-группам.",
         SHEET_CHART_TURNS: "График динамики оборачиваемости по продукт-группам.",
-        SHEET_CHART_SLOW: "График динамики низкооборачиваемых остатков по продукт-группам.",
+        SHEET_CHART_SLOW: "График динамики низкооборачиваемых товаров по продукт-группам.",
+        SHEET_CHART_NONLIQ: "График динамики остатков неликвидных товаров по продукт-группам.",
         SHEET_DETAIL_LAST_WEEK: "Детализация до номенклатуры по последней неделе из исходного файла 1С, без нижней строки итогов.",
     }
 
@@ -758,9 +818,11 @@ def add_toc_sheet(wb) -> None:
         SHEET_STOCK,
         SHEET_TURNS,
         SHEET_SLOW,
+        SHEET_NONLIQ,
         SHEET_CHART_STOCK,
         SHEET_CHART_TURNS,
         SHEET_CHART_SLOW,
+        SHEET_CHART_NONLIQ,
         SHEET_DETAIL_LAST_WEEK,
     ]
 
@@ -919,10 +981,19 @@ def convert_turnover_csv_to_xlsx(
         week_map=week_map,
     )  # 7A: wide-таблица по низкооборачиваемым остаткам
 
+    nonliq_df = build_wide_metric_table(
+        df=df_long,
+        value_col="nonliq_stock",
+        prefix_label="Неликвиды",
+        row_order=row_order,
+        week_map=week_map,
+    )  # 7A: wide-таблица по неликвидам
+
     full_df = build_all_sheet(
         stock_df=stock_df,
         turns_df=turns_df,
         slow_df=slow_df,
+        nonliq_df=nonliq_df,
     )  # 7A: собираем общий лист
 
     write_data_sheets(
@@ -931,6 +1002,7 @@ def convert_turnover_csv_to_xlsx(
         stock_df=stock_df,
         turns_df=turns_df,
         slow_df=slow_df,
+        nonliq_df=nonliq_df,
     )  # 7A: записываем табличные листы
 
     wb = load_workbook(xlsx_path)  # 7A: открываем Excel для форматирования и графиков
@@ -939,6 +1011,7 @@ def convert_turnover_csv_to_xlsx(
     format_worksheet(wb[SHEET_STOCK], first_col_width=52)  # 7A: форматируем остатки
     format_worksheet(wb[SHEET_TURNS], first_col_width=52)  # 7A: форматируем оборачиваемость
     format_worksheet(wb[SHEET_SLOW], first_col_width=52)  # 7A: форматируем низкооборачиваемые
+    format_worksheet(wb[SHEET_NONLIQ], first_col_width=52)  # 7A: форматируем неликвиды
 
     add_line_chart_sheet(
         wb=wb,
@@ -958,13 +1031,20 @@ def convert_turnover_csv_to_xlsx(
         wb=wb,
         source_sheet_name=SHEET_SLOW,
         chart_sheet_name=SHEET_CHART_SLOW,
-        chart_title="Остатки низкооборачиваемых",
+        chart_title="Остатки низкооборачиваемых товаров (НОТ)",
     )  # 7A: график низкооборачиваемых
+
+    add_line_chart_sheet(
+        wb=wb,
+        source_sheet_name=SHEET_NONLIQ,
+        chart_sheet_name=SHEET_CHART_NONLIQ,
+        chart_title="Остатки неликвидов",
+    )  # 7A: график неликвидов
 
     add_summary_dashboard_sheet(
         wb=wb,
         summary_df=summary_df,
-    )  # 7A: добавляем новый лист с тремя общими графиками
+    )  # 7A: добавляем новый лист с итоговыми графиками
 
     add_last_week_detail_sheet(
         wb=wb,
@@ -981,9 +1061,11 @@ def convert_turnover_csv_to_xlsx(
         SHEET_STOCK,
         SHEET_TURNS,
         SHEET_SLOW,
+        SHEET_NONLIQ,
         SHEET_CHART_STOCK,
         SHEET_CHART_TURNS,
         SHEET_CHART_SLOW,
+        SHEET_CHART_NONLIQ,
         SHEET_DETAIL_LAST_WEEK,
     ]  # 7A: желаемый порядок листов
 

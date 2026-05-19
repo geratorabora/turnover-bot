@@ -24,10 +24,12 @@ OUTPUT_CSV_NAME = "turnover.csv"  # 1B: имя промежуточного CSV
 
 
 # ===== 1C START =====
-if CSV_TO_EXEL_DIR.exists() and str(CSV_TO_EXEL_DIR) not in sys.path:  # 1C: локально даём Python найти соседний проект
-    sys.path.insert(0, str(CSV_TO_EXEL_DIR))  # 1C: добавляем соседнюю папку в путь импорта
+if str(BOT_DIR) not in sys.path:  # 1C: сначала гарантируем приоритет локального модуля из turnover_bot
+    sys.path.insert(0, str(BOT_DIR))  # 1C: добавляем текущую папку первой в sys.path
+if CSV_TO_EXEL_DIR.exists() and str(CSV_TO_EXEL_DIR) not in sys.path:  # 1C: соседний проект оставляем только как запасной источник
+    sys.path.append(str(CSV_TO_EXEL_DIR))  # 1C: добавляем его в конец, чтобы локальная копия имела приоритет
 
-from csv_to_xlsx_turnover import convert_turnover_csv_to_xlsx  # noqa: E402  # 1C: существующий prettifier
+from csv_to_xlsx_turnover import convert_turnover_csv_to_xlsx  # noqa: E402  # 1C: prettifier c приоритетом локальной версии
 # ===== 1C END =====
 
 
