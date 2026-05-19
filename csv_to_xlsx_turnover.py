@@ -938,6 +938,8 @@ def add_last_week_detail_sheet(wb, source_detail_path: Path) -> None:
     header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)  # 6D: переносы в шапке
     data_align = Alignment(vertical="top", wrap_text=False)  # 6D: обычное выравнивание данных
     fmt_int_thousands = "#,##0"  # 6D: формат с разделением разрядов для стоимостных и количественных колонок
+    odd_row_fill = PatternFill(fill_type="solid", fgColor="FFFFFF")  # 6D: белая заливка для нечётных строк данных
+    even_row_fill = PatternFill(fill_type="solid", fgColor="F3F3F3")  # 6D: бледно-серая заливка для чётных строк данных
 
     for col_num in range(1, target_ws.max_column + 1):  # 6D: идём по всем колонкам после удаления
         col_letter = target_ws.cell(1, col_num).column_letter  # 6D: получаем букву колонки
@@ -957,12 +959,14 @@ def add_last_week_detail_sheet(wb, source_detail_path: Path) -> None:
         for row_num in range(2, target_ws.max_row + 1):  # 6D: форматируем строки данных
             data_cell = target_ws.cell(row_num, col_num)  # 6D: текущая ячейка данных
             data_cell.alignment = data_align  # 6D: оставляем данные без переноса
+            data_cell.fill = odd_row_fill if row_num % 2 == 0 else even_row_fill  # 6D: чередуем белый и бледно-серый фон
             if header_value in money_columns:  # 6D: для нужных колонок включаем разделение разрядов
                 data_cell.number_format = fmt_int_thousands  # 6D: применяем числовой формат
 
     target_ws.auto_filter.ref = f"A1:{target_ws.cell(1, target_ws.max_column).column_letter}{target_ws.max_row}"  # 6D: включаем фильтр на весь диапазон
     target_ws.row_dimensions[1].height = 36  # 6D: даём шапке место под переносы
     target_ws.freeze_panes = "A2"  # 6D: закрепляем верхнюю строку
+    target_ws.sheet_view.showGridLines = False  # 6D: убираем стандартную сетку, чтобы заливка читалась чище
 # ===== 6D END =====
 
 
