@@ -27,6 +27,8 @@ SHEET_STOCK = "Общий остаток"  # 1B: лист по остаткам
 SHEET_TURNS = "Оборачиваемость"  # 1B: лист по оборачиваемости
 SHEET_SLOW = "Остаток НОТ"  # 1B: лист по низкооборачиваемым товарам
 SHEET_NONLIQ = "Остаток неликвидов"  # 1B: лист по неликвидам
+SHEET_DISCREPANCIES = "Перечень расхождений"  # 1B: сверка остатков ведомости и оборачиваемости
+SHEET_DISCREPANCIES_SUMMARY = "Сумма расхождений"  # 1B: сводка расхождений по направлению и сегменту
 SHEET_BATCH_STOCK = "Остатки по сериям"  # 1B: лист со вторым отчётом по сериям и качеству
 SHEET_DETAIL_LAST_WEEK = "детализация последняя неделя"  # 1B: последний лист с исходной детализацией, имя <= 31 символа
 
@@ -1015,6 +1017,149 @@ def add_last_week_detail_sheet(
 
 
 # ===== 6E START =====
+def add_statement_discrepancies_sheet(wb, statement_discrepancies_df: Optional[pd.DataFrame]) -> None:
+    """
+    6E: Добавляем лист со сверкой расхождений между ведомостью и отчётом по оборачиваемости.
+    """
+
+    if statement_discrepancies_df is None or statement_discrepancies_df.empty:
+        return
+
+    if SHEET_DISCREPANCIES in wb.sheetnames:
+        del wb[SHEET_DISCREPANCIES]
+
+    ws = wb.create_sheet(SHEET_DISCREPANCIES)
+
+    for col_num, column_name in enumerate(statement_discrepancies_df.columns, start=1):
+        cell = ws.cell(1, col_num)
+        cell.value = column_name
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
+
+    for row_num, row in enumerate(statement_discrepancies_df.itertuples(index=False), start=2):
+        fill = PatternFill(fill_type="solid", fgColor="FFFFFF" if row_num % 2 == 0 else "E7E7E7")
+        for col_num, value in enumerate(row, start=1):
+            cell = ws.cell(row_num, col_num)
+            cell.value = value
+            cell.alignment = Alignment(vertical="top", wrap_text=False)
+            cell.fill = fill
+
+    ws.freeze_panes = "A2"
+    ws.sheet_view.showGridLines = False
+    ws.auto_filter.ref = f"A1:{ws.cell(1, ws.max_column).column_letter}{ws.max_row}"
+    ws.row_dimensions[1].height = 42
+
+    width_map = {
+        "A": 38,
+        "B": 16,
+        "C": 18,
+        "D": 20,
+        "E": 20,
+        "F": 22,
+        "G": 22,
+        "H": 18,
+        "I": 16,
+        "J": 18,
+        "K": 16,
+        "L": 18,
+        "M": 16,
+        "N": 18,
+    }
+    money_columns = {
+        "Средн себест из отчета по оборачиваемости",
+        "Себест из отчета по оборачиваемости",
+        "Сумма из ведомости по остаткам",
+        "Разница в себестоимости",
+    }
+    qty_columns = {
+        "Кол-во из отчета по оборачиваемости",
+        "Кол-во из ведомости по остаткам",
+        "Разница в кол-ве",
+    }
+
+    for col_num in range(1, ws.max_column + 1):
+        col_letter = ws.cell(1, col_num).column_letter
+        header_value = ws.cell(1, col_num).value
+        ws.column_dimensions[col_letter].width = width_map.get(col_letter, 16)
+
+        for data_row in range(2, ws.max_row + 1):
+            cell = ws.cell(data_row, col_num)
+            if header_value in money_columns:
+                cell.number_format = "#,##0.00"
+            elif header_value in qty_columns:
+                cell.number_format = "#,##0"
+# ===== 6E END =====
+
+
+# ===== 6F START =====
+def add_statement_discrepancies_summary_sheet(wb, statement_discrepancies_df: Optional[pd.DataFrame]) -> None:
+    """
+    6F: Добавляем сводку расхождений по направлению и сегменту.
+    """
+
+    if statement_discrepancies_df is None or statement_discrepancies_df.empty:
+        return
+
+    summary_df = statement_discrepancies_df.copy()
+    summary_df["Разница в кол-ве"] = pd.to_numeric(summary_df["Разница в кол-ве"], errors="coerce")
+    summary_df["Разница в себестоимости"] = pd.to_numeric(summary_df["Разница в себестоимости"], errors="coerce")
+
+    summary_df = (
+        summary_df.groupby(["Направление", "Сегмент"], dropna=False, as_index=False)
+        .agg(
+            {
+                "Разница в кол-ве": "sum",
+                "Разница в себестоимости": "sum",
+            }
+        )
+        .sort_values(
+            by=["Разница в себестоимости", "Разница в кол-ве", "Направление", "Сегмент"],
+            ascending=[False, False, True, True],
+            na_position="last",
+        )
+        .reset_index(drop=True)
+    )
+
+    if SHEET_DISCREPANCIES_SUMMARY in wb.sheetnames:
+        del wb[SHEET_DISCREPANCIES_SUMMARY]
+
+    ws = wb.create_sheet(SHEET_DISCREPANCIES_SUMMARY)
+
+    for col_num, column_name in enumerate(summary_df.columns, start=1):
+        cell = ws.cell(1, col_num)
+        cell.value = column_name
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
+
+    for row_num, row in enumerate(summary_df.itertuples(index=False), start=2):
+        fill = PatternFill(fill_type="solid", fgColor="FFFFFF" if row_num % 2 == 0 else "E7E7E7")
+        for col_num, value in enumerate(row, start=1):
+            cell = ws.cell(row_num, col_num)
+            cell.value = value
+            cell.alignment = Alignment(vertical="top", wrap_text=False)
+            cell.fill = fill
+
+    ws.freeze_panes = "A2"
+    ws.sheet_view.showGridLines = False
+    ws.auto_filter.ref = f"A1:{ws.cell(1, ws.max_column).column_letter}{ws.max_row}"
+    ws.row_dimensions[1].height = 32
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 28
+    ws.column_dimensions["C"].width = 18
+    ws.column_dimensions["D"].width = 22
+
+    for col_num in range(1, ws.max_column + 1):
+        header_value = ws.cell(1, col_num).value
+        for data_row in range(2, ws.max_row + 1):
+            cell = ws.cell(data_row, col_num)
+            if header_value == "Разница в кол-ве":
+                cell.number_format = "#,##0"
+            elif header_value == "Разница в себестоимости":
+                cell.number_format = "#,##0.00"
+# ===== 6F END =====
+
+
+# ===== 6G START =====
 def add_batch_stock_sheet(wb, batch_stock_df: pd.DataFrame) -> None:
     """
     6E: Добавляем отдельный лист по остаткам в разрезе серий/качеств.
@@ -1087,7 +1232,7 @@ def add_batch_stock_sheet(wb, batch_stock_df: pd.DataFrame) -> None:
                 cell.number_format = "dd.mm.yyyy"
             elif header_value == "Оценочный месяц производства":
                 cell.number_format = "mm.yyyy"
-# ===== 6E END =====
+# ===== 6G END =====
 
 
 # ===== 7A START =====

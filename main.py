@@ -1118,6 +1118,13 @@ async def finalize_and_send_report(message: Message, session: PendingUploadSessi
                 FSInputFile(pipeline_result.batch_xlsx_path, filename=batch_filename),
                 caption="Отдельно прикладываю вкладку по сериям."
             )
+
+        if pipeline_result.discrepancies_xlsx_path is not None:
+            discrepancies_filename = f"{session.report_date.strftime('%y%m%d')}_расхождения_оборачиваемость_и_ведомость_на_{session.report_date.strftime('%d_%m_%y')}.xlsx"
+            await message.answer_document(
+                FSInputFile(pipeline_result.discrepancies_xlsx_path, filename=discrepancies_filename),
+                caption="И отдельно прикладываю перечень расхождений с ведомостью."
+            )
     except Exception as e:
         await message.answer(f"❌ Готовый файл создан, но не смог отправить его в Telegram: {type(e).__name__}: {e}")
         cleanup_pending_session(session.chat_id)

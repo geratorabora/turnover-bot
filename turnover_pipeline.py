@@ -23,6 +23,7 @@ SHARED_EXPORT_SQL_PATH = CSV_TO_EXEL_DIR / "turnover_export.sql"  # 1B: SQL в �
 DEFAULT_EXPORT_SQL_PATH = LOCAL_EXPORT_SQL_PATH if LOCAL_EXPORT_SQL_PATH.exists() else SHARED_EXPORT_SQL_PATH  # 1B: выбираем доступный SQL
 OUTPUT_XLSX_NAME = "turnover_pretty.xlsx"  # 1B: имя готового файла для пользователя
 OUTPUT_BATCH_XLSX_NAME = "turnover_batch_stock.xlsx"  # 1B: отдельный файл по вкладке по сериям
+OUTPUT_DISCREPANCIES_XLSX_NAME = "turnover_statement_discrepancies.xlsx"  # 1B: отдельный файл по расхождениям ведомости
 OUTPUT_CSV_NAME = "turnover.csv"  # 1B: имя промежуточного CSV
 # ===== 1B END =====
 
@@ -33,7 +34,12 @@ if str(BOT_DIR) not in sys.path:  # 1C: сначала гарантируем п
 if CSV_TO_EXEL_DIR.exists() and str(CSV_TO_EXEL_DIR) not in sys.path:  # 1C: соседний проект оставляем только как запасной источник
     sys.path.append(str(CSV_TO_EXEL_DIR))  # 1C: добавляем его в конец, чтобы локальная копия имела приоритет
 
-from csv_to_xlsx_turnover import add_batch_stock_sheet, convert_turnover_csv_to_xlsx  # noqa: E402  # 1C: prettifier c приоритетом локальной версии
+from csv_to_xlsx_turnover import (  # noqa: E402  # 1C: prettifier c приоритетом локальной версии
+    add_batch_stock_sheet,
+    add_statement_discrepancies_sheet,
+    add_statement_discrepancies_summary_sheet,
+    convert_turnover_csv_to_xlsx,
+)
 # ===== 1C END =====
 
 
@@ -43,6 +49,7 @@ class TurnoverPipelineResult:
     csv_path: Path  # 2A: куда записали turnover.csv
     xlsx_path: Path  # 2A: куда записали turnover_pretty.xlsx
     batch_xlsx_path: Optional[Path]  # 2A: куда записали отдельный xlsx по сериям
+    discrepancies_xlsx_path: Optional[Path]  # 2A: куда записали отдельный xlsx по расхождениям ведомости
     exported_rows: int  # 2A: сколько строк вернула SQL-выгрузка
 # ===== 2A END =====
 
@@ -182,6 +189,26 @@ def export_batch_stock_xlsx(batch_stock_df: pd.DataFrame, xlsx_path: Path) -> Op
 # ===== 2C END =====
 
 
+# ===== 2CA START =====
+def export_statement_discrepancies_xlsx(statement_discrepancies_df: pd.DataFrame, xlsx_path: Path) -> Optional[Path]:
+    """
+    2CA: Собираем отдельный xlsx со сверкой расхождений и сводкой по направлениям/сегментам.
+    """
+
+    if statement_discrepancies_df is None or statement_discrepancies_df.empty:
+        return None
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    add_statement_discrepancies_sheet(wb=wb, statement_discrepancies_df=statement_discrepancies_df)
+    add_statement_discrepancies_summary_sheet(wb=wb, statement_discrepancies_df=statement_discrepancies_df)
+    desired_order = ["Перечень расхождений", "Сумма расхождений"]
+    wb._sheets = [wb[name] for name in desired_order if name in wb.sheetnames]
+    wb.save(xlsx_path)
+    return xlsx_path
+# ===== 2CA END =====
+
+
 # ===== 2D START =====
 def load_statement_adjustments(database_url: str, report_date: datetime) -> pd.DataFrame:
     """
@@ -224,6 +251,135 @@ def load_statement_adjustments(database_url: str, report_date: datetime) -> pd.D
 
     return pd.DataFrame(rows, columns=columns)
 # ===== 2D END =====
+
+
+# ===== 2E START =====
+def load_statement_discrepancies(database_url: str, report_date: datetime) -> pd.DataFrame:
+    """
+    2E: Готовим перечень расхождений между остатком из отчёта по оборачиваемости
+        и количеством из ведомости остатков.
+    """
+
+    sql = """
+    with turnover_base as (
+        select
+            r.period::date as report_dt,
+            max(trim(r.item)) as item,
+            r.item_code,
+            max(trim(r.article)) as article,
+            max(trim(r.supplier)) as supplier,
+            max(trim(r.segment)) as segment,
+            max(trim(r.gau)) as direction,
+            sum(r.curr_stock_qty) as turnover_qty,
+            sum(r.curr_stock_cost) as turnover_cost,
+            case
+                when nullif(sum(r.curr_stock_qty), 0) is null then null
+                else sum(r.curr_stock_cost) / nullif(sum(r.curr_stock_qty), 0)
+            end as avg_unit_cost
+        from public.raw_turnover_stock r
+        where r.period::date = %s
+        group by r.period::date, r.item_code
+    ),
+    statement_base as (
+        select
+            s.report_dt,
+            s.item_code,
+            sum(s.stock_qty) as statement_qty
+        from public.raw_stock_statement s
+        where s.report_dt = %s
+        group by s.report_dt, s.item_code
+    ),
+    quality_base as (
+        select
+            b.report_dt,
+            b.item_code,
+            string_agg(distinct trim(b.quality), ', ' order by trim(b.quality)) as quality
+        from public.raw_stock_batches b
+        where b.report_dt = %s
+        group by b.report_dt, b.item_code
+    )
+    select
+        t.item as item_name,
+        t.article as article,
+        t.item_code as item_code,
+        q.quality as quality,
+        t.supplier as supplier,
+        t.segment as segment,
+        t.direction as direction,
+        round(t.avg_unit_cost, 2) as turnover_avg_cost,
+        t.turnover_qty as turnover_qty,
+        round(t.turnover_cost, 2) as turnover_cost,
+        s.statement_qty as statement_qty,
+        case
+            when s.statement_qty is not null and t.avg_unit_cost is not null
+                then round(s.statement_qty * t.avg_unit_cost, 2)
+            else null
+        end as statement_cost,
+        coalesce(s.statement_qty, 0) - coalesce(t.turnover_qty, 0) as qty_diff,
+        round(
+            coalesce(
+                case
+                    when s.statement_qty is not null and t.avg_unit_cost is not null
+                        then s.statement_qty * t.avg_unit_cost
+                    else null
+                end,
+                0
+            ) - coalesce(t.turnover_cost, 0),
+            2
+        ) as cost_diff
+    from turnover_base t
+    left join statement_base s
+        on s.report_dt = t.report_dt
+       and s.item_code = t.item_code
+    left join quality_base q
+        on q.report_dt = t.report_dt
+       and q.item_code = t.item_code
+    where s.statement_qty is distinct from t.turnover_qty
+    order by
+        abs(
+            coalesce(
+                case
+                    when s.statement_qty is not null and t.avg_unit_cost is not null
+                        then s.statement_qty * t.avg_unit_cost
+                    else null
+                end,
+                0
+            ) - coalesce(t.turnover_cost, 0)
+        ) desc nulls last,
+        abs(coalesce(s.statement_qty, 0) - coalesce(t.turnover_qty, 0)) desc nulls last,
+        t.article,
+        t.item
+    """
+
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is not set")
+
+    with psycopg.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (report_date.date(), report_date.date(), report_date.date()))
+            rows = cur.fetchall()
+            columns = [col.name for col in cur.description]
+
+    df = pd.DataFrame(rows, columns=columns)
+    return df.rename(
+        columns={
+            "item_name": "Номенклатура",
+            "article": "Артикул",
+            "item_code": "Код",
+            "quality": "Качество",
+            "supplier": "Поставщик",
+            "segment": "Сегмент",
+            "direction": "Направление",
+            "turnover_avg_cost": "Средн себест из отчета по оборачиваемости",
+            "turnover_qty": "Кол-во из отчета по оборачиваемости",
+            "turnover_cost": "Себест из отчета по оборачиваемости",
+            "statement_qty": "Кол-во из ведомости по остаткам",
+            "statement_cost": "Сумма из ведомости по остаткам",
+            "qty_diff": "Разница в кол-ве",
+            "cost_diff": "Разница в себестоимости",
+        }
+    )
+# ===== 2E END =====
 
 
 # ===== 3A START =====
@@ -281,11 +437,17 @@ def build_turnover_report(
     csv_path = work_dir / OUTPUT_CSV_NAME  # 4A: промежуточный CSV во временной папке
     xlsx_path = work_dir / OUTPUT_XLSX_NAME  # 4A: итоговый Excel во временной папке
     batch_xlsx_path = work_dir / OUTPUT_BATCH_XLSX_NAME  # 4A: отдельный xlsx по серии
+    discrepancies_xlsx_path = work_dir / OUTPUT_DISCREPANCIES_XLSX_NAME  # 4A: отдельный xlsx по расхождениям ведомости
     batch_stock_df = None  # 4A: по умолчанию дополнительного листа нет
     statement_adjustments_df = None  # 4A: уточнение количеств/себестоимости для детализации
+    statement_discrepancies_df = None  # 4A: отдельный лист со сверкой ведомости и оборачиваемости
 
     if report_date is not None:
         statement_adjustments_df = load_statement_adjustments(
+            database_url=database_url,
+            report_date=report_date,
+        )
+        statement_discrepancies_df = load_statement_discrepancies(
             database_url=database_url,
             report_date=report_date,
         )
@@ -319,10 +481,16 @@ def build_turnover_report(
             xlsx_path=batch_xlsx_path,
         )
 
+    exported_discrepancies_xlsx_path = export_statement_discrepancies_xlsx(
+        statement_discrepancies_df=statement_discrepancies_df,
+        xlsx_path=discrepancies_xlsx_path,
+    )
+
     return TurnoverPipelineResult(  # 4A: возвращаем все важные пути и счётчик
         csv_path=csv_path,
         xlsx_path=xlsx_path,
         batch_xlsx_path=exported_batch_xlsx_path,
+        discrepancies_xlsx_path=exported_discrepancies_xlsx_path,
         exported_rows=exported_rows,
     )
 # ===== 4A END =====
