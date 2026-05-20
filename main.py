@@ -1148,7 +1148,8 @@ def register_start(dp: Dispatcher) -> None:
     async def start(message: Message) -> None:
         await message.answer(
             "Бот запущен. Жду основной Excel по оборачиваемости 📊\n"
-            "После него можно прислать второй файл: остатки по сериям."
+            "После него пришли файл с ведомостью по остаткам,\n"
+            "а потом — остатки по сериям."
         )
 # ===== 4B END =====
 
