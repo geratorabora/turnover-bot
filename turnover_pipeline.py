@@ -182,6 +182,50 @@ def export_batch_stock_xlsx(batch_stock_df: pd.DataFrame, xlsx_path: Path) -> Op
 # ===== 2C END =====
 
 
+# ===== 2D START =====
+def load_statement_adjustments(database_url: str, report_date: datetime) -> pd.DataFrame:
+    """
+    2D: Подготавливаем уточнение остатка по коду номенклатуры для листа детализации.
+    """
+
+    sql = """
+    with statement_qty as (
+        select
+            report_dt,
+            item_code,
+            sum(stock_qty) as statement_qty
+        from public.raw_stock_statement
+        where report_dt = %s
+        group by report_dt, item_code
+    )
+    select
+        r.item_code,
+        s.statement_qty,
+        case
+            when s.statement_qty is not null and nullif(r.curr_stock_qty, 0) is not null
+                then (r.curr_stock_cost / nullif(r.curr_stock_qty, 0)) * s.statement_qty
+            else r.curr_stock_cost
+        end as adjusted_stock_cost
+    from public.raw_turnover_stock r
+    left join statement_qty s
+        on s.report_dt = r.period::date
+       and s.item_code = r.item_code
+    where r.period::date = %s
+    """
+
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is not set")
+
+    with psycopg.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (report_date.date(), report_date.date()))
+            rows = cur.fetchall()
+            columns = [col.name for col in cur.description]
+
+    return pd.DataFrame(rows, columns=columns)
+# ===== 2D END =====
+
+
 # ===== 3A START =====
 def export_turnover_csv(
     database_url: str,
@@ -238,7 +282,13 @@ def build_turnover_report(
     xlsx_path = work_dir / OUTPUT_XLSX_NAME  # 4A: итоговый Excel во временной папке
     batch_xlsx_path = work_dir / OUTPUT_BATCH_XLSX_NAME  # 4A: отдельный xlsx по серии
     batch_stock_df = None  # 4A: по умолчанию дополнительного листа нет
+    statement_adjustments_df = None  # 4A: уточнение количеств/себестоимости для детализации
 
+    if report_date is not None:
+        statement_adjustments_df = load_statement_adjustments(
+            database_url=database_url,
+            report_date=report_date,
+        )
     if include_batch_sheet and report_date is not None:
         batch_stock_df = load_batch_stock_sheet_data(
             database_url=database_url,
@@ -256,6 +306,7 @@ def build_turnover_report(
         xlsx_path=xlsx_path,
         source_detail_path=source_detail_path,
         batch_stock_df=batch_stock_df,
+        statement_adjustments_df=statement_adjustments_df,
     )
 
     if not xlsx_path.exists():  # 4A: защита от тихого сбоя генерации

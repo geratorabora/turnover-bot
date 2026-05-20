@@ -29,6 +29,7 @@ DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL")  # 1C: строка по
 
 TABLE_NAME: str = "public.raw_turnover_stock"  # 1C: целевая таблица в БД (сырой слой)
 BATCH_TABLE_NAME: str = "public.raw_stock_batches"  # 1C: целевая таблица второго сырого слоя по сериям
+STATEMENT_TABLE_NAME: str = "public.raw_stock_statement"  # 1C: сырой слой ведомости остатков
 
 # 1C: синонимы значений да/нет (часто встречаются в отчётах)
 TRUE_WORDS = {"1", "true", "True", "TRUE", "да", "Да", "ДА", "yes", "Yes", "Y", "y"}
@@ -90,8 +91,18 @@ BATCH_RUS_TO_DB: Dict[str, str] = {
 }
 REQUIRED_BATCH_DB_COLS = set(BATCH_RUS_TO_DB.values())
 
+STATEMENT_RUS_TO_DB: Dict[str, str] = {
+    "Номенклатура": "item",
+    "Ед. изм.": "unit_name",
+    "Артикул": "article",
+    "Номенклатура.Код": "item_code",
+    "Количество": "stock_qty",
+}
+REQUIRED_STATEMENT_DB_COLS = set(STATEMENT_RUS_TO_DB.values())
+
 MAIN_REPORT_HINT_COLS = {"Номенклатура.Код", "Оборачиваемость, руб", "Конечный остаток (товары)"}
 BATCH_REPORT_HINT_COLS = {"Номенклатура.Код", "Номенклатура.Качество", "Годен до", "Серия", "Конечный остаток"}
+STATEMENT_REPORT_HINT_COLS = {"Номенклатура.Код", "Количество", "Ед. изм.", "Артикул"}
 
 
 @dataclass
@@ -101,6 +112,7 @@ class PendingUploadSession:
     main_report_path: Path  # 1C: путь к загруженному основному отчёту
     main_source_filename: str  # 1C: имя исходного основного файла
     report_date: datetime  # 1C: общая дата отчёта для обеих загрузок
+    expected_next: str  # 1C: какой файл ждём следующим: statement или batch
 
 
 PENDING_UPLOADS: Dict[int, PendingUploadSession] = {}  # 1C: минимальное состояние по чатам
@@ -623,6 +635,43 @@ def ensure_schema() -> None:
         on {BATCH_TABLE_NAME} (report_dt, item_code, quality, series, expiry_dt);
         """
     )
+
+    db_exec(
+        f"""
+        create table if not exists {STATEMENT_TABLE_NAME} (
+            id bigserial primary key,
+            report_dt date not null,
+            loaded_ts timestamptz not null default now(),
+            source_file text,
+
+            item text,
+            item_code text,
+            article text,
+            unit_name text,
+            stock_qty numeric,
+            payload jsonb,
+
+            constraint ux_raw_stock_statement unique (report_dt, item_code)
+        );
+        """
+    )
+
+    db_exec(f"alter table {STATEMENT_TABLE_NAME} add column if not exists report_dt date;")
+    db_exec(f"alter table {STATEMENT_TABLE_NAME} add column if not exists loaded_ts timestamptz not null default now();")
+    db_exec(f"alter table {STATEMENT_TABLE_NAME} add column if not exists source_file text;")
+    db_exec(f"alter table {STATEMENT_TABLE_NAME} add column if not exists item text;")
+    db_exec(f"alter table {STATEMENT_TABLE_NAME} add column if not exists item_code text;")
+    db_exec(f"alter table {STATEMENT_TABLE_NAME} add column if not exists article text;")
+    db_exec(f"alter table {STATEMENT_TABLE_NAME} add column if not exists unit_name text;")
+    db_exec(f"alter table {STATEMENT_TABLE_NAME} add column if not exists stock_qty numeric;")
+    db_exec(f"alter table {STATEMENT_TABLE_NAME} add column if not exists payload jsonb;")
+
+    db_exec(
+        f"""
+        create unique index if not exists ux_raw_stock_statement_report_code
+        on {STATEMENT_TABLE_NAME} (report_dt, item_code);
+        """
+    )
 # ===== 3B END =====
 
 
@@ -824,6 +873,8 @@ def detect_report_kind(df: pd.DataFrame) -> Optional[str]:
     normalized_cols = {normalize_excel_header(col) for col in df.columns}
     if MAIN_REPORT_HINT_COLS.issubset(normalized_cols) and ("Period" in normalized_cols or "Период" in normalized_cols):
         return "main"
+    if STATEMENT_REPORT_HINT_COLS.issubset(normalized_cols):
+        return "statement"
     if BATCH_REPORT_HINT_COLS.issubset(normalized_cols):
         return "batch"
     return None
@@ -947,6 +998,72 @@ def upsert_batches_dataframe(df: pd.DataFrame, source_file: str, report_date: da
     return (len(df), len(rows))
 
 
+def upsert_statement_dataframe(df: pd.DataFrame, source_file: str, report_date: datetime) -> Tuple[int, int]:
+    # 3D: загрузчик ведомости остатков в отдельную raw-таблицу
+    if df.empty:
+        return (0, 0)
+
+    df = df.copy()
+    df.columns = [normalize_excel_header(col) for col in df.columns]
+    df = df.rename(columns=STATEMENT_RUS_TO_DB)
+
+    missing = sorted(list(REQUIRED_STATEMENT_DB_COLS - set(df.columns)))
+    if missing:
+        actual_cols = list(df.columns)
+        raise ValueError(
+            f"Missing required statement columns after rename: {missing}. "
+            f"Actual columns after normalize/rename: {actual_cols}"
+        )
+
+    report_dt = report_date.date()
+    rows: List[Tuple[Any, ...]] = []
+
+    for i in range(len(df)):
+        row = df.iloc[i]
+        item_code = _s(row.get("item_code"))
+        stock_qty = parse_numeric(row.get("stock_qty"))
+        if not item_code or stock_qty is None:
+            continue
+
+        rows.append(
+            (
+                report_dt,
+                source_file,
+                _s(row.get("item")),
+                item_code,
+                _s(row.get("article")),
+                _s(row.get("unit_name")),
+                stock_qty,
+                Jsonb(row_to_payload(row)),
+            )
+        )
+
+    sql = f"""
+    insert into {STATEMENT_TABLE_NAME} (
+        report_dt, source_file, item, item_code, article, unit_name, stock_qty, payload
+    )
+    values (
+        %s, %s, %s, %s, %s, %s, %s, %s
+    )
+    on conflict (report_dt, item_code)
+    do update set
+        source_file = excluded.source_file,
+        item = excluded.item,
+        article = excluded.article,
+        unit_name = excluded.unit_name,
+        stock_qty = excluded.stock_qty,
+        payload = excluded.payload
+    ;
+    """
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(sql, rows)
+        conn.commit()
+
+    return (len(df), len(rows))
+
+
 def cleanup_pending_session(chat_id: int) -> None:
     # 3D: очищаем временные файлы после завершения цикла
     session = PENDING_UPLOADS.pop(chat_id, None)
@@ -1038,7 +1155,8 @@ def register_db_check(dp: Dispatcher) -> None:
             ensure_schema()
             row = db_fetchone(f"select to_regclass('{TABLE_NAME}');")
             batch_row = db_fetchone(f"select to_regclass('{BATCH_TABLE_NAME}');")
-            await message.answer(f"✅ БД доступна. Таблицы: {row[0]}, {batch_row[0]}")
+            statement_row = db_fetchone(f"select to_regclass('{STATEMENT_TABLE_NAME}');")
+            await message.answer(f"✅ БД доступна. Таблицы: {row[0]}, {statement_row[0]}, {batch_row[0]}")
         except Exception as e:
             await message.answer(f"❌ Ошибка БД: {type(e).__name__}: {e}")
 # ===== 4C END =====
@@ -1097,6 +1215,7 @@ def register_excel_upload(dp: Dispatcher) -> None:
                     main_report_path=tmp_path,
                     main_source_filename=filename,
                     report_date=report_date,
+                    expected_next="statement",
                 )
 
                 await message.answer(
@@ -1104,16 +1223,61 @@ def register_excel_upload(dp: Dispatcher) -> None:
                     f"Строк в файле: {total_rows}\n"
                     f"Строк к вставке (после фильтров): {attempt_rows}\n"
                     f"Колонок в файле: {len(cols)}\n\n"
+                    "Теперь пришли файл \"остатки из ведомости\".\n"
+                    "После него я попрошу файл \"остатки по сериям\"."
+                )
+                return
+
+            if report_kind == "statement":
+                session = PENDING_UPLOADS.get(message.chat.id)
+                if session is None:
+                    await message.answer(
+                        "Сначала пришли основной отчёт по оборачиваемости, а уже потом файл \"остатки из ведомости\"."
+                    )
+                    shutil.rmtree(tmp_root, ignore_errors=True)
+                    return
+                if session.expected_next != "statement":
+                    await message.answer(
+                        "Сейчас я жду другой шаг. После ведомости можно будет прислать файл \"остатки по сериям\"."
+                    )
+                    shutil.rmtree(tmp_root, ignore_errors=True)
+                    return
+
+                try:
+                    ensure_schema()
+                    total_rows, attempt_rows = upsert_statement_dataframe(
+                        df=df,
+                        source_file=filename,
+                        report_date=session.report_date,
+                    )
+                except Exception as e:
+                    await message.answer(f"❌ Ошибка загрузки ведомости остатков: {type(e).__name__}: {e}")
+                    shutil.rmtree(tmp_root, ignore_errors=True)
+                    return
+
+                session.expected_next = "batch"
+
+                await message.answer(
+                    "✅ Ведомость остатков загружена.\n"
+                    f"Строк в файле: {total_rows}\n"
+                    f"Строк к вставке (после фильтров): {attempt_rows}\n"
                     "Теперь пришли файл \"остатки по сериям\".\n"
                     "Если его сейчас нет, просто напиши: пропустить"
                 )
+                shutil.rmtree(tmp_root, ignore_errors=True)
                 return
 
             if report_kind == "batch":
                 session = PENDING_UPLOADS.get(message.chat.id)
                 if session is None:
                     await message.answer(
-                        "Сначала пришли основной отчёт по оборачиваемости, а уже потом файл \"остатки по сериям\"."
+                        "Сначала пришли основной отчёт по оборачиваемости, потом ведомость остатков, и только потом файл \"остатки по сериям\"."
+                    )
+                    shutil.rmtree(tmp_root, ignore_errors=True)
+                    return
+                if session.expected_next != "batch":
+                    await message.answer(
+                        "Сейчас я жду файл \"остатки из ведомости\". После него можно будет прислать отчёт по сериям."
                     )
                     shutil.rmtree(tmp_root, ignore_errors=True)
                     return
@@ -1142,7 +1306,7 @@ def register_excel_upload(dp: Dispatcher) -> None:
 
             await message.answer(
                 "Файл прочитан, но я не понял его тип.\n"
-                "Ожидал либо основной отчёт по оборачиваемости, либо отчёт \"остатки по сериям\".\n"
+                "Ожидал основной отчёт по оборачиваемости, ведомость остатков или отчёт \"остатки по сериям\".\n"
                 f"Первые колонки: {cols[:8]}"
             )
             shutil.rmtree(tmp_root, ignore_errors=True)
@@ -1165,6 +1329,9 @@ def register_skip_batch(dp: Dispatcher) -> None:
             if session is None:
                 await message.answer("Сейчас нечего пропускать: сначала пришли основной отчёт.")
                 return
+            if session.expected_next == "statement":
+                await message.answer("Ведомость остатков сейчас обязательна. Сначала пришли файл \"остатки из ведомости\".")
+                return
 
             await message.answer("Ок, собираю отчёт без данных по сериям...")
             await finalize_and_send_report(message, session, include_batch_sheet=False)
@@ -1186,8 +1353,8 @@ def register_fallback_debug(dp: Dispatcher) -> None:
     async def debug_any(message: Message) -> None:
         if message.chat.id in PENDING_UPLOADS:
             await message.answer(
-                "Я сейчас жду второй файл: \"остатки по сериям\".\n"
-                "Если его нет, просто напиши: пропустить"
+                "Я сейчас жду следующий файл по цепочке загрузки.\n"
+                "Если уже дошли до шага с сериями и его нет, просто напиши: пропустить"
             )
             return
 

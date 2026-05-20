@@ -5,19 +5,47 @@ with weeks as (
     from public.raw_turnover_stock
     group by period::date
 ),
-base as (
+statement_qty as (
+    select
+        report_dt,
+        item_code,
+        sum(stock_qty) as statement_qty
+    from public.raw_stock_statement
+    group by report_dt, item_code
+),
+item_base as (
     select
         r.period::date as week_dt,
         w.week_num,
         trim(r.pg) as pg,
         trim(r.segment) as segment,
-        sum(r.curr_stock_cost) as stock_cost,
-        sum(r.sales_cost) as sales_cost,
-        sum(r.av_stock_cost) as av_stock_cost,
-        sum(r.curr_stock_cost) filter (where r.turns_rub < 2 or r.turns_rub is null) as slow_stock_lt2,
-        sum(r.curr_stock_cost) filter (where r.nonliq is true) as nonliq_stock
+        r.sales_cost,
+        r.av_stock_cost,
+        r.turns_rub,
+        r.nonliq,
+        case
+            when s.statement_qty is not null and nullif(r.curr_stock_qty, 0) is not null
+                then (r.curr_stock_cost / nullif(r.curr_stock_qty, 0)) * s.statement_qty
+            else r.curr_stock_cost
+        end as adjusted_stock_cost
     from public.raw_turnover_stock r
     join weeks w on w.week_dt = r.period::date
+    left join statement_qty s
+        on s.report_dt = r.period::date
+       and s.item_code = r.item_code
+),
+base as (
+    select
+        i.week_dt,
+        i.week_num,
+        i.pg,
+        i.segment,
+        sum(i.adjusted_stock_cost) as stock_cost,
+        sum(i.sales_cost) as sales_cost,
+        sum(i.av_stock_cost) as av_stock_cost,
+        sum(i.adjusted_stock_cost) filter (where i.turns_rub < 2 or i.turns_rub is null) as slow_stock_lt2,
+        sum(i.adjusted_stock_cost) filter (where i.nonliq is true) as nonliq_stock
+    from item_base i
     group by 1, 2, 3, 4
 ),
 seg_rows as (
