@@ -1017,10 +1017,18 @@ def add_batch_stock_sheet(wb, batch_stock_df: pd.DataFrame) -> None:
         "H": 18,
         "I": 16,
         "J": 20,
+        "K": 18,
+        "L": 18,
+        "M": 16,
     }
 
     money_columns = {"Средняя себестоимость", "Общая себестоимость"}
-    qty_columns = {"Остаток по партиям"}
+    qty_columns = {
+        "Остаток по партиям",
+        "Общее кол-во по артикулу в отчете по оборачиваемости",
+        "Общее кол-во по артикулу в отчете по сериям",
+        "Разница в количестве",
+    }
 
     for col_num in range(1, ws.max_column + 1):
         col_letter = ws.cell(1, col_num).column_letter

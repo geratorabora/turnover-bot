@@ -994,6 +994,13 @@ async def finalize_and_send_report(message: Message, session: PendingUploadSessi
                 f"Строк в SQL-выгрузке: {pipeline_result.exported_rows}"
             ),
         )
+
+        if include_batch_sheet and pipeline_result.batch_xlsx_path is not None:
+            batch_filename = f"{session.report_date.strftime('%y%m%d')}_остатки_по_сериям_на_{session.report_date.strftime('%d_%m_%y')}.xlsx"
+            await message.answer_document(
+                FSInputFile(pipeline_result.batch_xlsx_path, filename=batch_filename),
+                caption="Отдельно прикладываю вкладку по сериям."
+            )
     except Exception as e:
         await message.answer(f"❌ Готовый файл создан, но не смог отправить его в Telegram: {type(e).__name__}: {e}")
         cleanup_pending_session(session.chat_id)
