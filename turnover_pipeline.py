@@ -4,9 +4,11 @@ from __future__ import annotations  # 1A: современная типизац�
 import csv  # 1A: запись CSV без DBeaver
 import sys  # 1A: подключение соседнего проекта csv_to_exel
 from dataclasses import dataclass  # 1A: простой результат pipeline
+from datetime import datetime  # 1A: дата отчёта для второго листа
 from pathlib import Path  # 1A: пути к файлам
 from typing import Optional  # 1A: опциональные значения
 
+import pandas as pd  # 1A: batch-выгрузка в отдельный лист
 import psycopg  # 1A: PostgreSQL
 # ===== 1A END =====
 
@@ -40,6 +42,68 @@ class TurnoverPipelineResult:
     xlsx_path: Path  # 2A: куда записали turnover_pretty.xlsx
     exported_rows: int  # 2A: сколько строк вернула SQL-выгрузка
 # ===== 2A END =====
+
+
+# ===== 2B START =====
+def load_batch_stock_sheet_data(database_url: str, report_date: datetime) -> pd.DataFrame:
+    """
+    2B: Загружаем данные для дополнительного листа по сериям.
+    Берём batch-остатки и подтягиваем среднюю себестоимость из turnover-таблицы.
+    """
+
+    sql = """
+    with turnover_unit_cost as (
+        select
+            period::date as report_dt,
+            item_code,
+            max(trim(item)) as item,
+            max(trim(article)) as article,
+            sum(curr_stock_qty) as turnover_qty,
+            sum(curr_stock_cost) as turnover_cost,
+            case
+                when nullif(sum(curr_stock_qty), 0) is null then null
+                else sum(curr_stock_cost) / nullif(sum(curr_stock_qty), 0)
+            end as avg_unit_cost
+        from public.raw_turnover_stock
+        where period::date = %s
+        group by period::date, item_code
+    )
+    select
+        coalesce(nullif(trim(b.item), ''), t.item) as "Наименование",
+        coalesce(nullif(trim(b.article), ''), t.article) as "Артикул",
+        b.quality as "Качество",
+        b.series as "Серия",
+        b.expiry_dt as "Годен до",
+        b.batch_stock_qty as "Остаток по партиям",
+        round(t.avg_unit_cost, 2) as "Средняя себестоимость",
+        round(b.batch_stock_qty * t.avg_unit_cost, 2) as "Общая себестоимость",
+        b.months_on_stock as "Месяцев на складе",
+        b.estimated_prod_month as "Оценочный месяц производства"
+    from public.raw_stock_batches b
+    left join turnover_unit_cost t
+        on t.report_dt = b.report_dt
+       and t.item_code = b.item_code
+    where b.report_dt = %s
+    order by
+        coalesce(nullif(trim(b.item), ''), t.item),
+        coalesce(nullif(trim(b.article), ''), t.article),
+        b.quality,
+        b.estimated_prod_month,
+        b.expiry_dt,
+        b.series
+    """
+
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is not set")
+
+    with psycopg.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (report_date.date(), report_date.date()))
+            rows = cur.fetchall()
+            columns = [col.name for col in cur.description]
+
+    return pd.DataFrame(rows, columns=columns)
+# ===== 2B END =====
 
 
 # ===== 3A START =====
@@ -84,6 +148,8 @@ def build_turnover_report(
     database_url: str,
     work_dir: Path,
     source_detail_path: Path,
+    report_date: Optional[datetime] = None,
+    include_batch_sheet: bool = False,
     sql_path: Optional[Path] = None,
 ) -> TurnoverPipelineResult:
     """
@@ -94,6 +160,13 @@ def build_turnover_report(
     export_sql_path = sql_path or DEFAULT_EXPORT_SQL_PATH  # 4A: используем SQL по умолчанию, если не передали другой
     csv_path = work_dir / OUTPUT_CSV_NAME  # 4A: промежуточный CSV во временной папке
     xlsx_path = work_dir / OUTPUT_XLSX_NAME  # 4A: итоговый Excel во временной папке
+    batch_stock_df = None  # 4A: по умолчанию дополнительного листа нет
+
+    if include_batch_sheet and report_date is not None:
+        batch_stock_df = load_batch_stock_sheet_data(
+            database_url=database_url,
+            report_date=report_date,
+        )
 
     exported_rows = export_turnover_csv(  # 4A: выполняем SQL и сохраняем CSV
         database_url=database_url,
@@ -105,6 +178,7 @@ def build_turnover_report(
         csv_path=csv_path,
         xlsx_path=xlsx_path,
         source_detail_path=source_detail_path,
+        batch_stock_df=batch_stock_df,
     )
 
     if not xlsx_path.exists():  # 4A: защита от тихого сбоя генерации

@@ -27,6 +27,7 @@ SHEET_STOCK = "Общий остаток"  # 1B: лист по остаткам
 SHEET_TURNS = "Оборачиваемость"  # 1B: лист по оборачиваемости
 SHEET_SLOW = "Остаток НОТ"  # 1B: лист по низкооборачиваемым товарам
 SHEET_NONLIQ = "Остаток неликвидов"  # 1B: лист по неликвидам
+SHEET_BATCH_STOCK = "Остатки по сериям"  # 1B: лист со вторым отчётом по сериям и качеству
 SHEET_DETAIL_LAST_WEEK = "детализация последняя неделя"  # 1B: последний лист с исходной детализацией, имя <= 31 символа
 
 SHEET_CHART_STOCK = "График общий остаток"  # 1B: график остатков
@@ -805,6 +806,7 @@ def add_toc_sheet(wb) -> None:
         SHEET_TURNS: "Таблица только по оборачиваемости в разрезе продукт-групп и сегментов.",
         SHEET_SLOW: "Таблица только по низкооборачиваемым товарам (НОТ).",
         SHEET_NONLIQ: "Таблица только по остаткам неликвидных товаров.",
+        SHEET_BATCH_STOCK: "Детализация по сериям и качеству: остаток по партиям, средняя и общая себестоимость, месяцы на складе.",
         SHEET_CHART_STOCK: "График динамики общего остатка по продукт-группам.",
         SHEET_CHART_TURNS: "График динамики оборачиваемости по продукт-группам.",
         SHEET_CHART_SLOW: "График динамики низкооборачиваемых товаров по продукт-группам.",
@@ -820,6 +822,7 @@ def add_toc_sheet(wb) -> None:
         SHEET_TURNS,
         SHEET_SLOW,
         SHEET_NONLIQ,
+        SHEET_BATCH_STOCK,
         SHEET_CHART_STOCK,
         SHEET_CHART_TURNS,
         SHEET_CHART_SLOW,
@@ -970,6 +973,73 @@ def add_last_week_detail_sheet(wb, source_detail_path: Path) -> None:
 # ===== 6D END =====
 
 
+# ===== 6E START =====
+def add_batch_stock_sheet(wb, batch_stock_df: pd.DataFrame) -> None:
+    """
+    6E: Добавляем отдельный лист по остаткам в разрезе серий/качеств.
+    """
+
+    if batch_stock_df is None or batch_stock_df.empty:
+        return
+
+    if SHEET_BATCH_STOCK in wb.sheetnames:
+        del wb[SHEET_BATCH_STOCK]
+
+    ws = wb.create_sheet(SHEET_BATCH_STOCK)
+
+    for col_num, column_name in enumerate(batch_stock_df.columns, start=1):
+        cell = ws.cell(1, col_num)
+        cell.value = column_name
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
+
+    for row_num, row in enumerate(batch_stock_df.itertuples(index=False), start=2):
+        fill = PatternFill(fill_type="solid", fgColor="FFFFFF" if row_num % 2 == 0 else "E7E7E7")
+        for col_num, value in enumerate(row, start=1):
+            cell = ws.cell(row_num, col_num)
+            cell.value = value
+            cell.alignment = Alignment(vertical="top", wrap_text=False)
+            cell.fill = fill
+
+    ws.freeze_panes = "A2"
+    ws.sheet_view.showGridLines = False
+    ws.auto_filter.ref = f"A1:{ws.cell(1, ws.max_column).column_letter}{ws.max_row}"
+    ws.row_dimensions[1].height = 32
+
+    width_map = {
+        "A": 36,
+        "B": 14,
+        "C": 18,
+        "D": 26,
+        "E": 14,
+        "F": 14,
+        "G": 18,
+        "H": 18,
+        "I": 16,
+        "J": 20,
+    }
+
+    money_columns = {"Средняя себестоимость", "Общая себестоимость"}
+    qty_columns = {"Остаток по партиям"}
+
+    for col_num in range(1, ws.max_column + 1):
+        col_letter = ws.cell(1, col_num).column_letter
+        ws.column_dimensions[col_letter].width = width_map.get(col_letter, 14)
+        header_value = ws.cell(1, col_num).value
+
+        for data_row in range(2, ws.max_row + 1):
+            cell = ws.cell(data_row, col_num)
+            if header_value in money_columns:
+                cell.number_format = "#,##0.00"
+            elif header_value in qty_columns:
+                cell.number_format = "#,##0"
+            elif header_value == "Годен до":
+                cell.number_format = "dd.mm.yyyy"
+            elif header_value == "Оценочный месяц производства":
+                cell.number_format = "mm.yyyy"
+# ===== 6E END =====
+
+
 # ===== 7A START =====
 def convert_turnover_csv_to_xlsx(
     csv_path: str | Path,
@@ -977,6 +1047,7 @@ def convert_turnover_csv_to_xlsx(
     sep: str = ";",
     encoding: str = "utf-8",
     source_detail_path: Optional[str | Path] = None,
+    batch_stock_df: Optional[pd.DataFrame] = None,
 ) -> Path:
     """
     7A: Главная функция:
@@ -1102,6 +1173,11 @@ def convert_turnover_csv_to_xlsx(
         source_detail_path=detail_path,
     )  # 7A: добавляем лист с детализацией до номенклатуры за последнюю неделю
 
+    add_batch_stock_sheet(
+        wb=wb,
+        batch_stock_df=batch_stock_df,
+    )  # 7A: при наличии добавляем лист по сериям и качеству
+
     add_toc_sheet(wb=wb)  # 7A: добавляем лист-оглавление
 
     # 7A: Переставляем листы в нужный итоговый порядок
@@ -1113,6 +1189,7 @@ def convert_turnover_csv_to_xlsx(
         SHEET_TURNS,
         SHEET_SLOW,
         SHEET_NONLIQ,
+        SHEET_BATCH_STOCK,
         SHEET_CHART_STOCK,
         SHEET_CHART_TURNS,
         SHEET_CHART_SLOW,

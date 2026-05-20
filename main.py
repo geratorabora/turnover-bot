@@ -2,7 +2,9 @@
 import asyncio  # 1A: асинхронный запуск
 import logging  # 1A: логирование
 import os  # 1A: переменные окружения
+import shutil  # 1A: очистка временных папок после двухшаговой загрузки
 import tempfile  # 1A: временные папки/файлы
+from dataclasses import dataclass  # 1A: модель состояния ожидания второго файла
 from datetime import datetime  # 1A: НУЖНО для parse_timestamp/row_to_payload
 from pathlib import Path  # 1A: работа с путями
 from typing import Any, Dict, List, Optional, Tuple  # 1A: типы
@@ -26,6 +28,7 @@ BOT_TOKEN: Optional[str] = os.getenv("BOT_TOKEN")  # 1C: токен Telegram-б�
 DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL")  # 1C: строка подключения к Postgres (Railway)
 
 TABLE_NAME: str = "public.raw_turnover_stock"  # 1C: целевая таблица в БД (сырой слой)
+BATCH_TABLE_NAME: str = "public.raw_stock_batches"  # 1C: целевая таблица второго сырого слоя по сериям
 
 # 1C: синонимы значений да/нет (часто встречаются в отчётах)
 TRUE_WORDS = {"1", "true", "True", "TRUE", "да", "Да", "ДА", "yes", "Yes", "Y", "y"}
@@ -69,6 +72,38 @@ RUS_TO_DB: Dict[str, str] = {
 
 # 1C: набор обязательных колонок после переименования (контроль контракта в коде)
 REQUIRED_DB_COLS = set(RUS_TO_DB.values())
+
+# 1C: КОНТРАКТ колонок второго отчёта "остатки по сериям"
+BATCH_RUS_TO_DB: Dict[str, str] = {
+    "Номенклатура": "item",
+    "Номенклатура.Код": "item_code",
+    "Артикул": "article",
+    "Номенклатура.Качество": "quality",
+    "Номенклатура.Срок годности": "shelf_life_value",
+    "Номенклатура.Единица измерения срока годности": "shelf_life_unit",
+    "Годен до": "expiry_dt",
+    "Серия": "series",
+    "Остаточный срок годности (дни)": "residual_shelf_life_days",
+    "Месяц": "months_on_stock",
+    "Конечный остаток": "batch_stock_qty",
+    "Изменение в %": "change_pct",
+}
+REQUIRED_BATCH_DB_COLS = set(BATCH_RUS_TO_DB.values())
+
+MAIN_REPORT_HINT_COLS = {"Номенклатура.Код", "Оборачиваемость, руб", "Конечный остаток (товары)"}
+BATCH_REPORT_HINT_COLS = {"Номенклатура.Код", "Номенклатура.Качество", "Годен до", "Серия", "Конечный остаток"}
+
+
+@dataclass
+class PendingUploadSession:
+    chat_id: int  # 1C: чат, в котором ждём второй файл
+    work_dir: Path  # 1C: временная рабочая папка текущего цикла
+    main_report_path: Path  # 1C: путь к загруженному основному отчёту
+    main_source_filename: str  # 1C: имя исходного основного файла
+    report_date: datetime  # 1C: общая дата отчёта для обеих загрузок
+
+
+PENDING_UPLOADS: Dict[int, PendingUploadSession] = {}  # 1C: минимальное состояние по чатам
 
 # ===== 1C END =====
 
@@ -253,9 +288,9 @@ def parse_timestamp(v: Any) -> Optional["datetime"]:
 
 
 # ===== 2C START =====
-def build_report_filename(source_filename: str, df: pd.DataFrame) -> str:
+def derive_report_date(source_filename: str, df: pd.DataFrame) -> datetime:
     """
-    2C: Формируем имя итогового отчёта по дате входного файла.
+    2C: Определяем дату отчёта по имени входного файла.
         Основной вариант: первые 6 цифр в имени исходного файла = YYMMDD.
         Запасной вариант: максимальная дата из колонки Period / Период.
     """
@@ -291,9 +326,19 @@ def build_report_filename(source_filename: str, df: pd.DataFrame) -> str:
     if report_date is None:
         report_date = datetime.now()
 
+    return report_date
+
+
+def build_report_filename_from_date(report_date: datetime) -> str:
+    # 2C: Формируем имя итогового Excel из уже известной даты отчёта
     prefix = report_date.strftime("%y%m%d")
     suffix = report_date.strftime("%d_%m_%y")
     return f"{prefix}_оборачиваемость_и_остатки_на_основных_складах_на_{suffix}.xlsx"
+
+
+def build_report_filename(source_filename: str, df: pd.DataFrame) -> str:
+    # 2C: совместимая оболочка для старых вызовов
+    return build_report_filename_from_date(derive_report_date(source_filename, df))
 # ===== 2C END =====
 
 
@@ -391,6 +436,14 @@ def db_fetchone(sql: str) -> Any:
         with conn.cursor() as cur:
             cur.execute(sql)
             return cur.fetchone()
+
+
+def db_fetchall(sql: str, params: Optional[Tuple[Any, ...]] = None) -> List[Any]:
+    # 3A: выполнить SQL и вернуть все строки
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params or ())
+            return cur.fetchall()
 # ===== 3A END =====
 
 
@@ -512,6 +565,62 @@ def ensure_schema() -> None:
         f"""
         create unique index if not exists ux_raw_turnover_stock_period_code
         on {TABLE_NAME} (period, item_code);
+        """
+    )
+
+    db_exec(
+        f"""
+        create table if not exists {BATCH_TABLE_NAME} (
+            id bigserial primary key,
+            report_dt date not null,
+            loaded_ts timestamptz not null default now(),
+            source_file text,
+
+            item text,
+            item_code text,
+            article text,
+            quality text,
+
+            shelf_life_value numeric,
+            shelf_life_unit text,
+            expiry_dt date,
+            series text,
+
+            residual_shelf_life_days numeric,
+            months_on_stock numeric,
+            estimated_prod_month date,
+            batch_stock_qty numeric,
+            change_pct numeric,
+
+            payload jsonb,
+
+            constraint ux_raw_stock_batches unique (report_dt, item_code, quality, series, expiry_dt)
+        );
+        """
+    )
+
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists report_dt date;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists loaded_ts timestamptz not null default now();")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists source_file text;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists item text;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists item_code text;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists article text;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists quality text;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists shelf_life_value numeric;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists shelf_life_unit text;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists expiry_dt date;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists series text;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists residual_shelf_life_days numeric;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists months_on_stock numeric;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists estimated_prod_month date;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists batch_stock_qty numeric;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists change_pct numeric;")
+    db_exec(f"alter table {BATCH_TABLE_NAME} add column if not exists payload jsonb;")
+
+    db_exec(
+        f"""
+        create unique index if not exists ux_raw_stock_batches_report_code_quality_series_expiry
+        on {BATCH_TABLE_NAME} (report_dt, item_code, quality, series, expiry_dt);
         """
     )
 # ===== 3B END =====
@@ -709,6 +818,191 @@ def upsert_dataframe(df: pd.DataFrame, source_file: str) -> Tuple[int, int]:
 # ===== 3C END =====
 
 
+# ===== 3D START =====
+def detect_report_kind(df: pd.DataFrame) -> Optional[str]:
+    # 3D: распознаём тип отчёта по набору колонок
+    normalized_cols = {normalize_excel_header(col) for col in df.columns}
+    if MAIN_REPORT_HINT_COLS.issubset(normalized_cols) and ("Period" in normalized_cols or "Период" in normalized_cols):
+        return "main"
+    if BATCH_REPORT_HINT_COLS.issubset(normalized_cols):
+        return "batch"
+    return None
+
+
+def estimate_production_month(
+    expiry_dt: Optional[datetime],
+    shelf_life_value: Optional[float],
+    shelf_life_unit: Optional[str],
+) -> Optional[datetime]:
+    # 3D: оцениваем месяц производства как "годен до" минус общий срок годности
+    if expiry_dt is None or shelf_life_value is None:
+        return None
+
+    unit = (shelf_life_unit or "").strip().lower()
+    amount = int(round(shelf_life_value))
+    ts = pd.Timestamp(expiry_dt)
+
+    try:
+        if unit.startswith("мес"):
+            prod_ts = ts - pd.DateOffset(months=amount)
+        elif unit.startswith("год"):
+            prod_ts = ts - pd.DateOffset(years=amount)
+        elif unit.startswith("дн") or unit.startswith("day"):
+            prod_ts = ts - pd.Timedelta(days=amount)
+        else:
+            return None
+    except Exception:
+        return None
+
+    return datetime(prod_ts.year, prod_ts.month, 1)
+
+
+def upsert_batches_dataframe(df: pd.DataFrame, source_file: str, report_date: datetime) -> Tuple[int, int]:
+    # 3D: загрузчик второго отчёта по сериям в отдельную raw-таблицу
+    if df.empty:
+        return (0, 0)
+
+    df = df.copy()
+    df.columns = [normalize_excel_header(col) for col in df.columns]
+    df = df.rename(columns=BATCH_RUS_TO_DB)
+
+    missing = sorted(list(REQUIRED_BATCH_DB_COLS - set(df.columns)))
+    if missing:
+        actual_cols = list(df.columns)
+        raise ValueError(
+            f"Missing required batch columns after rename: {missing}. "
+            f"Actual columns after normalize/rename: {actual_cols}"
+        )
+
+    report_dt = report_date.date()
+    rows: List[Tuple[Any, ...]] = []
+
+    for i in range(len(df)):
+        row = df.iloc[i]
+        item_code = _s(row.get("item_code"))
+        if not item_code:
+            continue
+
+        expiry_ts = parse_timestamp(row.get("expiry_dt"))
+        expiry_date = expiry_ts.date() if expiry_ts is not None else None
+        shelf_life_value = parse_numeric(row.get("shelf_life_value"))
+        shelf_life_unit = _s(row.get("shelf_life_unit"))
+        estimated_prod_month = estimate_production_month(expiry_ts, shelf_life_value, shelf_life_unit)
+
+        rows.append(
+            (
+                report_dt,
+                source_file,
+                _s(row.get("item")),
+                item_code,
+                _s(row.get("article")),
+                _s(row.get("quality")),
+                shelf_life_value,
+                shelf_life_unit,
+                expiry_date,
+                _s(row.get("series")),
+                parse_numeric(row.get("residual_shelf_life_days")),
+                parse_numeric(row.get("months_on_stock")),
+                estimated_prod_month.date() if estimated_prod_month is not None else None,
+                parse_numeric(row.get("batch_stock_qty")),
+                parse_numeric(row.get("change_pct")),
+                Jsonb(row_to_payload(row)),
+            )
+        )
+
+    sql = f"""
+    insert into {BATCH_TABLE_NAME} (
+        report_dt, source_file, item, item_code, article, quality,
+        shelf_life_value, shelf_life_unit, expiry_dt, series,
+        residual_shelf_life_days, months_on_stock, estimated_prod_month,
+        batch_stock_qty, change_pct, payload
+    )
+    values (
+        %s, %s, %s, %s, %s, %s,
+        %s, %s, %s, %s,
+        %s, %s, %s,
+        %s, %s, %s
+    )
+    on conflict (report_dt, item_code, quality, series, expiry_dt)
+    do update set
+        source_file = excluded.source_file,
+        item = excluded.item,
+        article = excluded.article,
+        shelf_life_value = excluded.shelf_life_value,
+        shelf_life_unit = excluded.shelf_life_unit,
+        residual_shelf_life_days = excluded.residual_shelf_life_days,
+        months_on_stock = excluded.months_on_stock,
+        estimated_prod_month = excluded.estimated_prod_month,
+        batch_stock_qty = excluded.batch_stock_qty,
+        change_pct = excluded.change_pct,
+        payload = excluded.payload
+    ;
+    """
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(sql, rows)
+        conn.commit()
+
+    return (len(df), len(rows))
+
+
+def cleanup_pending_session(chat_id: int) -> None:
+    # 3D: очищаем временные файлы после завершения цикла
+    session = PENDING_UPLOADS.pop(chat_id, None)
+    if session is None:
+        return
+    shutil.rmtree(session.work_dir, ignore_errors=True)
+
+
+async def finalize_and_send_report(message: Message, session: PendingUploadSession, include_batch_sheet: bool) -> None:
+    # 3D: общий финализатор после первого или второго шага загрузки
+    try:
+        from turnover_pipeline import build_turnover_report
+    except Exception as e:
+        await message.answer(f"❌ Не смог подключить модуль сборки Excel: {type(e).__name__}: {e}")
+        cleanup_pending_session(session.chat_id)
+        return
+
+    try:
+        pipeline_result = build_turnover_report(
+            database_url=DATABASE_URL or "",
+            work_dir=session.work_dir,
+            source_detail_path=session.main_report_path,
+            report_date=session.report_date,
+            include_batch_sheet=include_batch_sheet,
+        )
+    except FileNotFoundError as e:
+        await message.answer(f"❌ SQL-файл выгрузки не найден: {e}")
+        cleanup_pending_session(session.chat_id)
+        return
+    except psycopg.OperationalError as e:
+        await message.answer(f"❌ Ошибка подключения к БД при SQL-выгрузке: {type(e).__name__}: {e}")
+        cleanup_pending_session(session.chat_id)
+        return
+    except Exception as e:
+        await message.answer(f"❌ Ошибка сборки turnover_pretty.xlsx: {type(e).__name__}: {e}")
+        cleanup_pending_session(session.chat_id)
+        return
+
+    try:
+        report_filename = build_report_filename_from_date(session.report_date)
+        await message.answer_document(
+            FSInputFile(pipeline_result.xlsx_path, filename=report_filename),
+            caption=(
+                f"✅ Готово: {report_filename}\n"
+                f"Строк в SQL-выгрузке: {pipeline_result.exported_rows}"
+            ),
+        )
+    except Exception as e:
+        await message.answer(f"❌ Готовый файл создан, но не смог отправить его в Telegram: {type(e).__name__}: {e}")
+        cleanup_pending_session(session.chat_id)
+        return
+
+    cleanup_pending_session(session.chat_id)
+# ===== 3D END =====
+
+
 # ===== 4A START =====
 def build_app() -> Dispatcher:
     # 4A: создаём диспетчер
@@ -721,7 +1015,10 @@ def register_start(dp: Dispatcher) -> None:
     # 4B: /start
     @dp.message(F.text == "/start")
     async def start(message: Message) -> None:
-        await message.answer("Бот запущен. Жду Excel 📊")
+        await message.answer(
+            "Бот запущен. Жду основной Excel по оборачиваемости 📊\n"
+            "После него можно прислать второй файл: остатки по сериям."
+        )
 # ===== 4B END =====
 
 
@@ -733,7 +1030,8 @@ def register_db_check(dp: Dispatcher) -> None:
         try:
             ensure_schema()
             row = db_fetchone(f"select to_regclass('{TABLE_NAME}');")
-            await message.answer(f"✅ БД доступна. Таблица: {row[0]}")
+            batch_row = db_fetchone(f"select to_regclass('{BATCH_TABLE_NAME}');")
+            await message.answer(f"✅ БД доступна. Таблицы: {row[0]}, {batch_row[0]}")
         except Exception as e:
             await message.answer(f"❌ Ошибка БД: {type(e).__name__}: {e}")
 # ===== 4C END =====
@@ -749,9 +1047,10 @@ def register_excel_upload(dp: Dispatcher) -> None:
             await message.answer("Пришли, пожалуйста, файл .xlsx")
             return
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir) / filename
+        tmp_root = Path(tempfile.mkdtemp(prefix="turnover_bot_"))
+        tmp_path = tmp_root / filename
 
+        try:
             tg_file = await message.bot.get_file(message.document.file_id)
             await message.bot.download_file(tg_file.file_path, destination=tmp_path)
 
@@ -760,90 +1059,132 @@ def register_excel_upload(dp: Dispatcher) -> None:
                 df = pd.read_excel(tmp_path)
             except Exception as e:
                 await message.answer(f"❌ Не смог прочитать Excel: {type(e).__name__}: {e}")
+                shutil.rmtree(tmp_root, ignore_errors=True)
                 return
 
             if df.empty:
                 await message.answer("Файл прочитан, но в нём 0 строк.")
+                shutil.rmtree(tmp_root, ignore_errors=True)
                 return
 
-            cols = list(df.columns)
-
-            if "Period" not in cols and "Период" not in cols:
-                await message.answer(
-                    "Файл прочитан, но не вижу колонку 'Period' (или 'Период').\n"
-                    f"Первые колонки: {cols[:8]}"
-                )
-                return
+            cols = [normalize_excel_header(col) for col in df.columns]
+            report_kind = detect_report_kind(df)
             # ===== 5B END =====
 
             # ===== 5C START =====
-            try:
-                ensure_schema()
-                total_rows, attempt_rows = upsert_dataframe(df, source_file=filename)
+            if report_kind == "main":
+                cleanup_pending_session(message.chat.id)
+
+                try:
+                    ensure_schema()
+                    total_rows, attempt_rows = upsert_dataframe(df, source_file=filename)
+                    report_date = derive_report_date(filename, df)
+                except Exception as e:
+                    await message.answer(f"❌ Ошибка загрузки в БД: {type(e).__name__}: {e}")
+                    shutil.rmtree(tmp_root, ignore_errors=True)
+                    return
+
+                PENDING_UPLOADS[message.chat.id] = PendingUploadSession(
+                    chat_id=message.chat.id,
+                    work_dir=tmp_root,
+                    main_report_path=tmp_path,
+                    main_source_filename=filename,
+                    report_date=report_date,
+                )
+
                 await message.answer(
-                    "✅ Загрузка в БД завершена.\n"
+                    "✅ Основной отчёт загружен в БД.\n"
                     f"Строк в файле: {total_rows}\n"
                     f"Строк к вставке (после фильтров): {attempt_rows}\n"
-                    f"Колонок в файле: {len(cols)}\n"
-                    "Собираю turnover_pretty.xlsx..."
+                    f"Колонок в файле: {len(cols)}\n\n"
+                    "Теперь пришли файл \"остатки по сериям\".\n"
+                    "Если его сейчас нет, просто напиши: пропустить"
                 )
-            except Exception as e:
-                await message.answer(f"❌ Ошибка загрузки в БД: {type(e).__name__}: {e}")
                 return
+
+            if report_kind == "batch":
+                session = PENDING_UPLOADS.get(message.chat.id)
+                if session is None:
+                    await message.answer(
+                        "Сначала пришли основной отчёт по оборачиваемости, а уже потом файл \"остатки по сериям\"."
+                    )
+                    shutil.rmtree(tmp_root, ignore_errors=True)
+                    return
+
+                try:
+                    ensure_schema()
+                    total_rows, attempt_rows = upsert_batches_dataframe(
+                        df=df,
+                        source_file=filename,
+                        report_date=session.report_date,
+                    )
+                except Exception as e:
+                    await message.answer(f"❌ Ошибка загрузки отчёта по сериям: {type(e).__name__}: {e}")
+                    shutil.rmtree(tmp_root, ignore_errors=True)
+                    return
+
+                await message.answer(
+                    "✅ Отчёт по сериям тоже загружен.\n"
+                    f"Строк в файле: {total_rows}\n"
+                    f"Строк к вставке (после фильтров): {attempt_rows}\n"
+                    "Собираю итоговый turnover_pretty.xlsx..."
+                )
+                shutil.rmtree(tmp_root, ignore_errors=True)
+                await finalize_and_send_report(message, session, include_batch_sheet=True)
+                return
+
+            await message.answer(
+                "Файл прочитан, но я не понял его тип.\n"
+                "Ожидал либо основной отчёт по оборачиваемости, либо отчёт \"остатки по сериям\".\n"
+                f"Первые колонки: {cols[:8]}"
+            )
+            shutil.rmtree(tmp_root, ignore_errors=True)
             # ===== 5C END =====
-
-            # ===== 5D START =====
-            try:
-                from turnover_pipeline import build_turnover_report
-            except Exception as e:
-                await message.answer(f"❌ Не смог подключить модуль сборки Excel: {type(e).__name__}: {e}")
-                return
-
-            try:
-                pipeline_result = build_turnover_report(
-                    database_url=DATABASE_URL or "",
-                    work_dir=Path(tmp_dir),
-                    source_detail_path=tmp_path,
-                )
-            except FileNotFoundError as e:
-                await message.answer(f"❌ SQL-файл выгрузки не найден: {e}")
-                return
-            except psycopg.OperationalError as e:
-                await message.answer(f"❌ Ошибка подключения к БД при SQL-выгрузке: {type(e).__name__}: {e}")
-                return
-            except Exception as e:
-                await message.answer(f"❌ Ошибка сборки turnover_pretty.xlsx: {type(e).__name__}: {e}")
-                return
-
-            try:
-                report_filename = build_report_filename(filename, df)
-                await message.answer_document(
-                    FSInputFile(pipeline_result.xlsx_path, filename=report_filename),
-                    caption=(
-                        f"✅ Готово: {report_filename}\n"
-                        f"Строк в SQL-выгрузке: {pipeline_result.exported_rows}"
-                    ),
-                )
-            except Exception as e:
-                await message.answer(f"❌ Готовый файл создан, но не смог отправить его в Telegram: {type(e).__name__}: {e}")
-                return
-            # ===== 5D END =====
+        except Exception:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+            raise
 # ===== 5A END =====
+
+
+# ===== 5D START =====
+def register_skip_batch(dp: Dispatcher) -> None:
+    # 5D: текстовые команды внутри двухшагового сценария
+    @dp.message(F.text)
+    async def handle_text_commands(message: Message) -> None:
+        text = (message.text or "").strip().lower()
+
+        if text == "пропустить":
+            session = PENDING_UPLOADS.get(message.chat.id)
+            if session is None:
+                await message.answer("Сейчас нечего пропускать: сначала пришли основной отчёт.")
+                return
+
+            await message.answer("Ок, собираю отчёт без данных по сериям...")
+            await finalize_and_send_report(message, session, include_batch_sheet=False)
+            return
+
+        if text == "/cancel":
+            if message.chat.id in PENDING_UPLOADS:
+                cleanup_pending_session(message.chat.id)
+                await message.answer("Текущий цикл загрузки отменён. Можно прислать новый основной отчёт.")
+            else:
+                await message.answer("Сейчас нет активной загрузки, которую нужно отменять.")
+# ===== 5D END =====
 
 
 # ===== 6A START =====
 def register_fallback_debug(dp: Dispatcher) -> None:
-    # 6A: fallback для отладки
+    # 6A: человеко-понятный fallback вместо сырого DEBUG
     @dp.message()
     async def debug_any(message: Message) -> None:
-        await message.answer(
-            "DEBUG:\n"
-            f"content_type={message.content_type}\n"
-            f"text={message.text is not None}\n"
-            f"document={message.document is not None}\n"
-            f"photo={message.photo is not None}\n"
-            f"caption={message.caption is not None}"
-        )
+        if message.chat.id in PENDING_UPLOADS:
+            await message.answer(
+                "Я сейчас жду второй файл: \"остатки по сериям\".\n"
+                "Если его нет, просто напиши: пропустить"
+            )
+            return
+
+        await message.answer("Пришли, пожалуйста, Excel-файл .xlsx с отчётом.")
 # ===== 6A END =====
 
 
@@ -861,6 +1202,7 @@ async def main() -> None:
     register_start(dp)
     register_db_check(dp)
     register_excel_upload(dp)
+    register_skip_batch(dp)
     register_fallback_debug(dp)  # потом можно отключить блоком целиком
 
     await dp.start_polling(bot)
