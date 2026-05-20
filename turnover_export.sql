@@ -13,6 +13,19 @@ statement_qty as (
     from public.raw_stock_statement
     group by report_dt, item_code
 ),
+cost_snapshot as (
+    select
+        report_dt,
+        item_code,
+        sum(stock_qty) as cost_qty,
+        sum(stock_cost) as cost_total,
+        case
+            when nullif(sum(stock_qty), 0) is null then null
+            else sum(stock_cost) / nullif(sum(stock_qty), 0)
+        end as cost_unit
+    from public.raw_stock_month_cost
+    group by report_dt, item_code
+),
 item_base as (
     select
         r.period::date as week_dt,
@@ -23,7 +36,19 @@ item_base as (
         r.av_stock_cost,
         r.turns_rub,
         r.nonliq,
+        coalesce(s.statement_qty, r.curr_stock_qty) as adjusted_stock_qty,
         case
+            when c.cost_qty is not null
+                 and c.cost_unit is not null
+                 and coalesce(s.statement_qty, r.curr_stock_qty) is not null
+                then case
+                    when c.cost_qty >= coalesce(s.statement_qty, r.curr_stock_qty)
+                        then c.cost_unit * coalesce(s.statement_qty, r.curr_stock_qty)
+                    else c.cost_total + (
+                        greatest(coalesce(s.statement_qty, r.curr_stock_qty) - c.cost_qty, 0)
+                        * coalesce(r.curr_stock_cost / nullif(r.curr_stock_qty, 0), 0)
+                    )
+                end
             when s.statement_qty is not null and nullif(r.curr_stock_qty, 0) is not null
                 then (r.curr_stock_cost / nullif(r.curr_stock_qty, 0)) * s.statement_qty
             else r.curr_stock_cost
@@ -33,6 +58,9 @@ item_base as (
     left join statement_qty s
         on s.report_dt = r.period::date
        and s.item_code = r.item_code
+    left join cost_snapshot c
+        on c.report_dt = r.period::date
+       and c.item_code = r.item_code
 ),
 base as (
     select

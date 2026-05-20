@@ -62,22 +62,85 @@ def load_batch_stock_sheet_data(database_url: str, report_date: datetime) -> pd.
     """
 
     sql = """
-    with turnover_unit_cost as (
+    with statement_qty as (
         select
-            period::date as report_dt,
+            report_dt,
             item_code,
-            max(trim(item)) as item,
-            max(trim(article)) as article,
-            coalesce(nullif(trim(max(article)), ''), item_code) as article_key,
-            sum(curr_stock_qty) as turnover_qty,
-            sum(curr_stock_cost) as turnover_cost,
+            sum(stock_qty) as statement_qty
+        from public.raw_stock_statement
+        where report_dt = %s
+        group by report_dt, item_code
+    ),
+    cost_snapshot as (
+        select
+            report_dt,
+            item_code,
+            sum(stock_qty) as cost_qty,
+            sum(stock_cost) as cost_total,
             case
-                when nullif(sum(curr_stock_qty), 0) is null then null
-                else sum(curr_stock_cost) / nullif(sum(curr_stock_qty), 0)
+                when nullif(sum(stock_qty), 0) is null then null
+                else sum(stock_cost) / nullif(sum(stock_qty), 0)
+            end as cost_unit
+        from public.raw_stock_month_cost
+        where report_dt = %s
+        group by report_dt, item_code
+    ),
+    turnover_unit_cost as (
+        select
+            r.period::date as report_dt,
+            r.item_code,
+            max(trim(r.item)) as item,
+            max(trim(r.article)) as article,
+            coalesce(nullif(trim(max(r.article)), ''), r.item_code) as article_key,
+            sum(coalesce(s.statement_qty, r.curr_stock_qty)) as turnover_qty,
+            sum(
+                case
+                    when c.cost_qty is not null
+                         and c.cost_unit is not null
+                         and coalesce(s.statement_qty, r.curr_stock_qty) is not null
+                        then case
+                            when c.cost_qty >= coalesce(s.statement_qty, r.curr_stock_qty)
+                                then c.cost_unit * coalesce(s.statement_qty, r.curr_stock_qty)
+                            else c.cost_total + (
+                                greatest(coalesce(s.statement_qty, r.curr_stock_qty) - c.cost_qty, 0)
+                                * coalesce(r.curr_stock_cost / nullif(r.curr_stock_qty, 0), 0)
+                            )
+                        end
+                    when s.statement_qty is not null and nullif(r.curr_stock_qty, 0) is not null
+                        then (r.curr_stock_cost / nullif(r.curr_stock_qty, 0)) * s.statement_qty
+                    else r.curr_stock_cost
+                end
+            ) as turnover_cost,
+            case
+                when nullif(sum(coalesce(s.statement_qty, r.curr_stock_qty)), 0) is null then null
+                else sum(
+                    case
+                        when c.cost_qty is not null
+                             and c.cost_unit is not null
+                             and coalesce(s.statement_qty, r.curr_stock_qty) is not null
+                            then case
+                                when c.cost_qty >= coalesce(s.statement_qty, r.curr_stock_qty)
+                                    then c.cost_unit * coalesce(s.statement_qty, r.curr_stock_qty)
+                                else c.cost_total + (
+                                    greatest(coalesce(s.statement_qty, r.curr_stock_qty) - c.cost_qty, 0)
+                                    * coalesce(r.curr_stock_cost / nullif(r.curr_stock_qty, 0), 0)
+                                )
+                            end
+                        when s.statement_qty is not null and nullif(r.curr_stock_qty, 0) is not null
+                            then (r.curr_stock_cost / nullif(r.curr_stock_qty, 0)) * s.statement_qty
+                        else r.curr_stock_cost
+                    end
+                ) / nullif(sum(coalesce(s.statement_qty, r.curr_stock_qty)), 0)
             end as avg_unit_cost
-        from public.raw_turnover_stock
-        where period::date = %s
-        group by period::date, item_code
+        from public.raw_turnover_stock r
+        left join statement_qty s
+            on s.report_dt = r.period::date
+           and s.item_code = r.item_code
+        left join cost_snapshot c
+            on c.report_dt = r.period::date
+           and c.item_code = r.item_code
+        where r.period::date = %s
+        group by r.period::date, r.item_code
     ),
     turnover_article_qty as (
         select
@@ -156,7 +219,7 @@ def load_batch_stock_sheet_data(database_url: str, report_date: datetime) -> pd.
 
     with psycopg.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (report_date.date(), report_date.date()))
+            cur.execute(sql, (report_date.date(), report_date.date(), report_date.date(), report_date.date()))
             rows = cur.fetchall()
             columns = [col.name for col in cur.description]
 
@@ -224,11 +287,36 @@ def load_statement_adjustments(database_url: str, report_date: datetime) -> pd.D
         from public.raw_stock_statement
         where report_dt = %s
         group by report_dt, item_code
+    ),
+    cost_snapshot as (
+        select
+            report_dt,
+            item_code,
+            sum(stock_qty) as cost_qty,
+            sum(stock_cost) as cost_total,
+            case
+                when nullif(sum(stock_qty), 0) is null then null
+                else sum(stock_cost) / nullif(sum(stock_qty), 0)
+            end as cost_unit
+        from public.raw_stock_month_cost
+        where report_dt = %s
+        group by report_dt, item_code
     )
     select
         r.item_code,
-        s.statement_qty,
+        coalesce(s.statement_qty, r.curr_stock_qty) as statement_qty,
         case
+            when c.cost_qty is not null
+                 and c.cost_unit is not null
+                 and coalesce(s.statement_qty, r.curr_stock_qty) is not null
+                then case
+                    when c.cost_qty >= coalesce(s.statement_qty, r.curr_stock_qty)
+                        then c.cost_unit * coalesce(s.statement_qty, r.curr_stock_qty)
+                    else c.cost_total + (
+                        greatest(coalesce(s.statement_qty, r.curr_stock_qty) - c.cost_qty, 0)
+                        * coalesce(r.curr_stock_cost / nullif(r.curr_stock_qty, 0), 0)
+                    )
+                end
             when s.statement_qty is not null and nullif(r.curr_stock_qty, 0) is not null
                 then (r.curr_stock_cost / nullif(r.curr_stock_qty, 0)) * s.statement_qty
             else r.curr_stock_cost
@@ -237,6 +325,9 @@ def load_statement_adjustments(database_url: str, report_date: datetime) -> pd.D
     left join statement_qty s
         on s.report_dt = r.period::date
        and s.item_code = r.item_code
+    left join cost_snapshot c
+        on c.report_dt = r.period::date
+       and c.item_code = r.item_code
     where r.period::date = %s
     """
 
@@ -245,7 +336,7 @@ def load_statement_adjustments(database_url: str, report_date: datetime) -> pd.D
 
     with psycopg.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (report_date.date(), report_date.date()))
+            cur.execute(sql, (report_date.date(), report_date.date(), report_date.date()))
             rows = cur.fetchall()
             columns = [col.name for col in cur.description]
 
@@ -289,6 +380,20 @@ def load_statement_discrepancies(database_url: str, report_date: datetime) -> pd
         where s.report_dt = %s
         group by s.report_dt, s.item_code
     ),
+    cost_snapshot as (
+        select
+            c.report_dt,
+            c.item_code,
+            sum(c.stock_qty) as cost_qty,
+            sum(c.stock_cost) as cost_total,
+            case
+                when nullif(sum(c.stock_qty), 0) is null then null
+                else sum(c.stock_cost) / nullif(sum(c.stock_qty), 0)
+            end as cost_unit
+        from public.raw_stock_month_cost c
+        where c.report_dt = %s
+        group by c.report_dt, c.item_code
+    ),
     quality_base as (
         select
             b.report_dt,
@@ -310,16 +415,39 @@ def load_statement_discrepancies(database_url: str, report_date: datetime) -> pd
         t.turnover_qty as turnover_qty,
         round(t.turnover_cost, 2) as turnover_cost,
         s.statement_qty as statement_qty,
-        case
-            when s.statement_qty is not null and t.avg_unit_cost is not null
-                then round(s.statement_qty * t.avg_unit_cost, 2)
-            else null
-        end as statement_cost,
+        round(
+            case
+                when s.statement_qty is null then null
+                when c.cost_qty is not null and c.cost_unit is not null
+                    then case
+                        when c.cost_qty >= s.statement_qty
+                            then c.cost_unit * s.statement_qty
+                        else c.cost_total + (
+                            greatest(s.statement_qty - c.cost_qty, 0)
+                            * coalesce(t.avg_unit_cost, 0)
+                        )
+                    end
+                when t.avg_unit_cost is not null
+                    then s.statement_qty * t.avg_unit_cost
+                else null
+            end,
+            2
+        ) as statement_cost,
         coalesce(s.statement_qty, 0) - coalesce(t.turnover_qty, 0) as qty_diff,
         round(
             coalesce(
                 case
-                    when s.statement_qty is not null and t.avg_unit_cost is not null
+                    when s.statement_qty is null then null
+                    when c.cost_qty is not null and c.cost_unit is not null
+                        then case
+                            when c.cost_qty >= s.statement_qty
+                                then c.cost_unit * s.statement_qty
+                            else c.cost_total + (
+                                greatest(s.statement_qty - c.cost_qty, 0)
+                                * coalesce(t.avg_unit_cost, 0)
+                            )
+                        end
+                    when t.avg_unit_cost is not null
                         then s.statement_qty * t.avg_unit_cost
                     else null
                 end,
@@ -331,6 +459,9 @@ def load_statement_discrepancies(database_url: str, report_date: datetime) -> pd
     left join statement_base s
         on s.report_dt = t.report_dt
        and s.item_code = t.item_code
+    left join cost_snapshot c
+        on c.report_dt = t.report_dt
+       and c.item_code = t.item_code
     left join quality_base q
         on q.report_dt = t.report_dt
        and q.item_code = t.item_code
@@ -339,7 +470,17 @@ def load_statement_discrepancies(database_url: str, report_date: datetime) -> pd
         abs(
             coalesce(
                 case
-                    when s.statement_qty is not null and t.avg_unit_cost is not null
+                    when s.statement_qty is null then null
+                    when c.cost_qty is not null and c.cost_unit is not null
+                        then case
+                            when c.cost_qty >= s.statement_qty
+                                then c.cost_unit * s.statement_qty
+                            else c.cost_total + (
+                                greatest(s.statement_qty - c.cost_qty, 0)
+                                * coalesce(t.avg_unit_cost, 0)
+                            )
+                        end
+                    when t.avg_unit_cost is not null
                         then s.statement_qty * t.avg_unit_cost
                     else null
                 end,
@@ -356,7 +497,7 @@ def load_statement_discrepancies(database_url: str, report_date: datetime) -> pd
 
     with psycopg.connect(database_url) as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (report_date.date(), report_date.date(), report_date.date()))
+            cur.execute(sql, (report_date.date(), report_date.date(), report_date.date(), report_date.date()))
             rows = cur.fetchall()
             columns = [col.name for col in cur.description]
 
