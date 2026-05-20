@@ -1015,11 +1015,12 @@ def add_batch_stock_sheet(wb, batch_stock_df: pd.DataFrame) -> None:
         "F": 14,
         "G": 18,
         "H": 18,
-        "I": 16,
-        "J": 20,
-        "K": 18,
+        "I": 18,
+        "J": 16,
+        "K": 20,
         "L": 18,
-        "M": 16,
+        "M": 18,
+        "N": 16,
     }
 
     money_columns = {"Средняя себестоимость", "Общая себестоимость"}

@@ -111,6 +111,12 @@ def load_batch_stock_sheet_data(database_url: str, report_date: datetime) -> pd.
         b.batch_stock_qty as "Остаток по партиям",
         round(t.avg_unit_cost, 2) as "Средняя себестоимость",
         round(b.batch_stock_qty * t.avg_unit_cost, 2) as "Общая себестоимость",
+        case
+            when b.months_on_stock > 12 then 'свыше года'
+            when b.months_on_stock >= 6 then 'от полгода до года'
+            when b.months_on_stock >= 3 then 'от 3 месяцев до полгода'
+            else 'менее 3 месяцев'
+        end as "Уровень",
         b.months_on_stock as "Месяцев на складе",
         b.estimated_prod_month as "Оценочный месяц производства",
         ta.turnover_article_qty as turnover_article_qty,
@@ -125,7 +131,12 @@ def load_batch_stock_sheet_data(database_url: str, report_date: datetime) -> pd.
     left join batch_article_qty ba
         on ba.article_key = b.article_key
     order by
-        b.months_on_stock desc nulls last,
+        case
+            when b.months_on_stock > 12 then 1
+            when b.months_on_stock >= 6 then 2
+            when b.months_on_stock >= 3 then 3
+            else 4
+        end,
         round(b.batch_stock_qty * t.avg_unit_cost, 2) desc nulls last,
         coalesce(nullif(trim(b.article), ''), t.article),
         b.quality,
