@@ -1178,6 +1178,13 @@ def upsert_cost_dataframe(df: pd.DataFrame, source_file: str, report_date: datet
     report_dt = report_date.date()
     closed_period_end = expected_closed_period_end().date()
     rows: List[Tuple[Any, ...]] = []
+    logging.info(
+        "cost_upsert_start source_file=%s report_dt=%s closed_period_end=%s rows_in_df=%s",
+        source_file,
+        report_dt,
+        closed_period_end,
+        len(df),
+    )
 
     for i in range(len(df)):
         row = df.iloc[i]
@@ -1227,6 +1234,12 @@ def upsert_cost_dataframe(df: pd.DataFrame, source_file: str, report_date: datet
             cur.executemany(sql, rows)
         conn.commit()
 
+    logging.info(
+        "cost_upsert_done source_file=%s report_dt=%s inserted_rows=%s",
+        source_file,
+        report_dt,
+        len(rows),
+    )
     return (len(df), len(rows))
 
 
@@ -1240,6 +1253,13 @@ def cleanup_pending_session(chat_id: int) -> None:
 
 async def finalize_and_send_report(message: Message, session: PendingUploadSession, include_batch_sheet: bool) -> None:
     # 3D: общий финализатор после первого или второго шага загрузки
+    logging.info(
+        "finalize_start chat_id=%s include_batch_sheet=%s report_date=%s work_dir=%s",
+        session.chat_id,
+        include_batch_sheet,
+        session.report_date.date(),
+        session.work_dir,
+    )
     try:
         from turnover_pipeline import build_turnover_report
     except Exception as e:
@@ -1264,6 +1284,7 @@ async def finalize_and_send_report(message: Message, session: PendingUploadSessi
         cleanup_pending_session(session.chat_id)
         return
     except Exception as e:
+        logging.exception("finalize_build_failed chat_id=%s", session.chat_id)
         await message.answer(f"❌ Ошибка сборки turnover_pretty.xlsx: {type(e).__name__}: {e}")
         cleanup_pending_session(session.chat_id)
         return
@@ -1291,7 +1312,16 @@ async def finalize_and_send_report(message: Message, session: PendingUploadSessi
                 FSInputFile(pipeline_result.discrepancies_xlsx_path, filename=discrepancies_filename),
                 caption="И отдельно прикладываю перечень расхождений с ведомостью."
             )
+        logging.info(
+            "finalize_send_done chat_id=%s include_batch_sheet=%s report_filename=%s batch_sent=%s discrepancies_sent=%s",
+            session.chat_id,
+            include_batch_sheet,
+            report_filename,
+            bool(include_batch_sheet and pipeline_result.batch_xlsx_path is not None),
+            bool(pipeline_result.discrepancies_xlsx_path is not None),
+        )
     except Exception as e:
+        logging.exception("finalize_send_failed chat_id=%s", session.chat_id)
         await message.answer(f"❌ Готовый файл создан, но не смог отправить его в Telegram: {type(e).__name__}: {e}")
         cleanup_pending_session(session.chat_id)
         return
@@ -1370,6 +1400,15 @@ def register_excel_upload(dp: Dispatcher) -> None:
 
             cols = [normalize_excel_header(col) for col in df.columns]
             report_kind = detect_report_kind(df)
+            logging.info(
+                "document_received chat_id=%s filename=%s report_kind=%s columns=%s rows=%s expected_next=%s",
+                message.chat.id,
+                filename,
+                report_kind,
+                cols[:8],
+                len(df),
+                PENDING_UPLOADS.get(message.chat.id).expected_next if message.chat.id in PENDING_UPLOADS else None,
+            )
             # ===== 5B END =====
 
             # ===== 5C START =====
@@ -1392,6 +1431,12 @@ def register_excel_upload(dp: Dispatcher) -> None:
                     main_source_filename=filename,
                     report_date=report_date,
                     expected_next="statement",
+                )
+                logging.info(
+                    "session_state_set chat_id=%s next_step=statement report_date=%s source_file=%s",
+                    message.chat.id,
+                    report_date.date(),
+                    filename,
                 )
 
                 await message.answer(
@@ -1432,6 +1477,12 @@ def register_excel_upload(dp: Dispatcher) -> None:
                     return
 
                 session.expected_next = "cost"
+                logging.info(
+                    "session_state_set chat_id=%s next_step=cost report_date=%s source_file=%s",
+                    message.chat.id,
+                    session.report_date.date(),
+                    filename,
+                )
 
                 await message.answer(
                     "✅ Ведомость остатков загружена.\n"
@@ -1466,11 +1517,18 @@ def register_excel_upload(dp: Dispatcher) -> None:
                         report_date=session.report_date,
                     )
                 except Exception as e:
+                    logging.exception("cost_step_failed chat_id=%s filename=%s", message.chat.id, filename)
                     await message.answer(f"❌ Ошибка загрузки отчёта по себестоимости: {type(e).__name__}: {e}")
                     shutil.rmtree(tmp_root, ignore_errors=True)
                     return
 
                 session.expected_next = "batch"
+                logging.info(
+                    "session_state_set chat_id=%s next_step=batch report_date=%s source_file=%s",
+                    message.chat.id,
+                    session.report_date.date(),
+                    filename,
+                )
 
                 await message.answer(
                     "✅ Отчёт по себестоимости закрытого периода загружен.\n"
@@ -1478,6 +1536,13 @@ def register_excel_upload(dp: Dispatcher) -> None:
                     f"Строк к вставке (после фильтров): {attempt_rows}\n"
                     "Теперь пришли файл \"остатки по сериям\".\n"
                     "Если его сейчас нет, просто напиши: пропустить"
+                )
+                logging.info(
+                    "cost_step_done chat_id=%s filename=%s total_rows=%s attempt_rows=%s",
+                    message.chat.id,
+                    filename,
+                    total_rows,
+                    attempt_rows,
                 )
                 shutil.rmtree(tmp_root, ignore_errors=True)
                 return
