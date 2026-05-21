@@ -35,6 +35,7 @@ if CSV_TO_EXEL_DIR.exists() and str(CSV_TO_EXEL_DIR) not in sys.path:  # 1C: с�
     sys.path.append(str(CSV_TO_EXEL_DIR))  # 1C: добавляем его в конец, чтобы локальная копия имела приоритет
 
 from csv_to_xlsx_turnover import (  # noqa: E402  # 1C: prettifier c приоритетом локальной версии
+    add_batch_stock_analytics_sheet,
     add_batch_stock_sheet,
     add_statement_discrepancies_sheet,
     add_statement_discrepancies_summary_sheet,
@@ -246,7 +247,10 @@ def export_batch_stock_xlsx(batch_stock_df: pd.DataFrame, xlsx_path: Path) -> Op
 
     wb = Workbook()
     wb.remove(wb.active)
+    add_batch_stock_analytics_sheet(wb=wb, batch_stock_df=batch_stock_df)
     add_batch_stock_sheet(wb=wb, batch_stock_df=batch_stock_df)
+    desired_order = ["Аналитика по сериям", "Остатки по сериям"]
+    wb._sheets = [wb[name] for name in desired_order if name in wb.sheetnames]
     wb.save(xlsx_path)
     return xlsx_path
 # ===== 2C END =====

@@ -29,6 +29,7 @@ SHEET_SLOW = "Остаток НОТ"  # 1B: лист по низкооборач
 SHEET_NONLIQ = "Остаток неликвидов"  # 1B: лист по неликвидам
 SHEET_DISCREPANCIES = "Перечень расхождений"  # 1B: сверка остатков ведомости и оборачиваемости
 SHEET_DISCREPANCIES_SUMMARY = "Сумма расхождений"  # 1B: сводка расхождений по направлению и сегменту
+SHEET_BATCH_ANALYTICS = "Аналитика по сериям"  # 1B: сводка по уровням хранения
 SHEET_BATCH_STOCK = "Остатки по сериям"  # 1B: лист со вторым отчётом по сериям и качеству
 SHEET_DETAIL_LAST_WEEK = "детализация последняя неделя"  # 1B: последний лист с исходной детализацией, имя <= 31 символа
 
@@ -808,7 +809,8 @@ def add_toc_sheet(wb) -> None:
         SHEET_TURNS: "Таблица только по оборачиваемости в разрезе продукт-групп и сегментов.",
         SHEET_SLOW: "Таблица только по низкооборачиваемым товарам (НОТ).",
         SHEET_NONLIQ: "Таблица только по остаткам неликвидных товаров.",
-        SHEET_BATCH_STOCK: "Детализация по сериям и качеству: остаток по партиям, средняя и общая себестоимость, месяцы на складе.",
+        SHEET_BATCH_ANALYTICS: "Краткая аналитика по уровням хранения: суммарная себестоимость остатков по сериям.",
+        SHEET_BATCH_STOCK: "Детализация по сериям и качеству: остаток по партиям, средняя и итоговая себестоимость, месяцы на складе.",
         SHEET_CHART_STOCK: "График динамики общего остатка по продукт-группам.",
         SHEET_CHART_TURNS: "График динамики оборачиваемости по продукт-группам.",
         SHEET_CHART_SLOW: "График динамики низкооборачиваемых товаров по продукт-группам.",
@@ -824,6 +826,7 @@ def add_toc_sheet(wb) -> None:
         SHEET_TURNS,
         SHEET_SLOW,
         SHEET_NONLIQ,
+        SHEET_BATCH_ANALYTICS,
         SHEET_BATCH_STOCK,
         SHEET_CHART_STOCK,
         SHEET_CHART_TURNS,
@@ -1160,12 +1163,107 @@ def add_statement_discrepancies_summary_sheet(wb, statement_discrepancies_df: Op
 
 
 # ===== 6G START =====
-def add_batch_stock_sheet(wb, batch_stock_df: pd.DataFrame) -> None:
+def prepare_batch_stock_detail_df(batch_stock_df: pd.DataFrame) -> pd.DataFrame:
     """
-    6E: Добавляем отдельный лист по остаткам в разрезе серий/качеств.
+    6G: Готовим детальный датафрейм по сериям в нужном пользователю порядке колонок.
     """
 
     if batch_stock_df is None or batch_stock_df.empty:
+        return pd.DataFrame()
+
+    detail_df = batch_stock_df.copy()
+    if "Общая себестоимость" in detail_df.columns:
+        detail_df = detail_df.rename(columns={"Общая себестоимость": "Итого себестоимость"})
+    if "Оценочный месяц производства" in detail_df.columns:
+        detail_df = detail_df.rename(columns={"Оценочный месяц производства": "Месяц производства"})
+
+    desired_columns = [
+        "Наименование",
+        "Артикул",
+        "Уровень",
+        "Месяцев на складе",
+        "Остаток по партиям",
+        "Средняя себестоимость",
+        "Итого себестоимость",
+        "Серия",
+        "Качество",
+        "Годен до",
+        "Месяц производства",
+    ]
+    existing_columns = [col for col in desired_columns if col in detail_df.columns]
+    return detail_df[existing_columns].copy()
+
+
+def prepare_batch_stock_analytics_df(batch_stock_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    6G: Готовим краткую аналитику по уровням хранения.
+    """
+
+    detail_df = prepare_batch_stock_detail_df(batch_stock_df)
+    if detail_df.empty:
+        return pd.DataFrame()
+
+    analytics_df = detail_df.groupby("Уровень", dropna=False, as_index=False).agg(
+        {"Итого себестоимость": "sum"}
+    )
+    analytics_df = analytics_df.sort_values(
+        by="Итого себестоимость",
+        ascending=False,
+        na_position="last",
+    ).reset_index(drop=True)
+    return analytics_df
+
+
+def add_batch_stock_analytics_sheet(wb, batch_stock_df: pd.DataFrame) -> None:
+    """
+    6G: Добавляем первую вкладку с аналитикой по уровням хранения.
+    """
+
+    analytics_df = prepare_batch_stock_analytics_df(batch_stock_df)
+    if analytics_df.empty:
+        return
+
+    if SHEET_BATCH_ANALYTICS in wb.sheetnames:
+        del wb[SHEET_BATCH_ANALYTICS]
+
+    ws = wb.create_sheet(SHEET_BATCH_ANALYTICS)
+
+    for col_num, column_name in enumerate(analytics_df.columns, start=1):
+        cell = ws.cell(1, col_num)
+        cell.value = column_name
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
+
+    for row_num, row in enumerate(analytics_df.itertuples(index=False), start=2):
+        fill = PatternFill(fill_type="solid", fgColor="FFFFFF" if row_num % 2 == 0 else "E7E7E7")
+        for col_num, value in enumerate(row, start=1):
+            cell = ws.cell(row_num, col_num)
+            cell.value = value
+            cell.alignment = Alignment(vertical="top", wrap_text=False)
+            cell.fill = fill
+
+    ws.freeze_panes = "A2"
+    ws.sheet_view.showGridLines = False
+    ws.auto_filter.ref = f"A1:{ws.cell(1, ws.max_column).column_letter}{ws.max_row}"
+    ws.row_dimensions[1].height = 28
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 22
+
+    for data_row in range(2, ws.max_row + 1):
+        ws.cell(data_row, 2).number_format = "#,##0.00"
+
+
+# ===== 6G END =====
+
+
+# ===== 6H START =====
+def add_batch_stock_sheet(wb, batch_stock_df: pd.DataFrame) -> None:
+    """
+    6H: Добавляем отдельный лист по остаткам в разрезе серий/качеств.
+    """
+
+    detail_df = prepare_batch_stock_detail_df(batch_stock_df)
+    if detail_df.empty:
         return
 
     if SHEET_BATCH_STOCK in wb.sheetnames:
@@ -1173,13 +1271,13 @@ def add_batch_stock_sheet(wb, batch_stock_df: pd.DataFrame) -> None:
 
     ws = wb.create_sheet(SHEET_BATCH_STOCK)
 
-    for col_num, column_name in enumerate(batch_stock_df.columns, start=1):
+    for col_num, column_name in enumerate(detail_df.columns, start=1):
         cell = ws.cell(1, col_num)
         cell.value = column_name
         cell.font = Font(bold=True)
         cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
 
-    for row_num, row in enumerate(batch_stock_df.itertuples(index=False), start=2):
+    for row_num, row in enumerate(detail_df.itertuples(index=False), start=2):
         fill = PatternFill(fill_type="solid", fgColor="FFFFFF" if row_num % 2 == 0 else "E7E7E7")
         for col_num, value in enumerate(row, start=1):
             cell = ws.cell(row_num, col_num)
@@ -1195,27 +1293,19 @@ def add_batch_stock_sheet(wb, batch_stock_df: pd.DataFrame) -> None:
     width_map = {
         "A": 36,
         "B": 14,
-        "C": 18,
-        "D": 26,
+        "C": 20,
+        "D": 16,
         "E": 14,
-        "F": 14,
+        "F": 18,
         "G": 18,
-        "H": 18,
+        "H": 26,
         "I": 18,
-        "J": 16,
+        "J": 14,
         "K": 20,
-        "L": 18,
-        "M": 18,
-        "N": 16,
     }
 
-    money_columns = {"Средняя себестоимость", "Общая себестоимость"}
-    qty_columns = {
-        "Остаток по партиям",
-        "Общее кол-во по артикулу в отчете по оборачиваемости",
-        "Общее кол-во по артикулу в отчете по сериям",
-        "Разница в количестве",
-    }
+    money_columns = {"Средняя себестоимость", "Итого себестоимость"}
+    qty_columns = {"Остаток по партиям", "Месяцев на складе"}
 
     for col_num in range(1, ws.max_column + 1):
         col_letter = ws.cell(1, col_num).column_letter
@@ -1230,9 +1320,9 @@ def add_batch_stock_sheet(wb, batch_stock_df: pd.DataFrame) -> None:
                 cell.number_format = "#,##0"
             elif header_value == "Годен до":
                 cell.number_format = "dd.mm.yyyy"
-            elif header_value == "Оценочный месяц производства":
+            elif header_value == "Месяц производства":
                 cell.number_format = "mm.yyyy"
-# ===== 6G END =====
+# ===== 6H END =====
 
 
 # ===== 7A START =====
@@ -1374,6 +1464,10 @@ def convert_turnover_csv_to_xlsx(
         wb=wb,
         batch_stock_df=batch_stock_df,
     )  # 7A: при наличии добавляем лист по сериям и качеству
+    add_batch_stock_analytics_sheet(
+        wb=wb,
+        batch_stock_df=batch_stock_df,
+    )  # 7A: добавляем аналитику по уровням хранения для блока серий
 
     add_toc_sheet(wb=wb)  # 7A: добавляем лист-оглавление
 
@@ -1386,6 +1480,7 @@ def convert_turnover_csv_to_xlsx(
         SHEET_TURNS,
         SHEET_SLOW,
         SHEET_NONLIQ,
+        SHEET_BATCH_ANALYTICS,
         SHEET_BATCH_STOCK,
         SHEET_CHART_STOCK,
         SHEET_CHART_TURNS,
