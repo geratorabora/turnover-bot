@@ -367,9 +367,19 @@ def build_report_filename(source_filename: str, df: pd.DataFrame) -> str:
 
 
 # ===== 2CA START =====
-def expected_closed_period_end(reference_dt: Optional[datetime] = None) -> datetime:
-    # 2CA: определяем, какой закрытый период сейчас считаем последним
+def last_sunday_before(reference_dt: Optional[datetime] = None) -> datetime:
+    # 2CA: находим последнее воскресенье перед текущей датой
     ref = reference_dt or datetime.now()
+    days_since_sunday = (ref.weekday() + 1) % 7
+    if days_since_sunday == 0:
+        days_since_sunday = 7
+    return ref - pd.Timedelta(days=days_since_sunday)
+
+
+def expected_closed_period_end(reference_dt: Optional[datetime] = None) -> datetime:
+    # 2CA: определяем, какой закрытый период сейчас считаем последним,
+    #      ориентируясь на последнее воскресенье перед текущей датой
+    ref = last_sunday_before(reference_dt)
 
     if ref.day < 20:
         target_year = ref.year
@@ -390,10 +400,8 @@ def build_cost_report_prompt(reference_dt: Optional[datetime] = None) -> str:
     # 2CA: пояснение пользователю, какой файл себестоимости нужен на этом шаге
     closed_period_end = expected_closed_period_end(reference_dt)
     return (
-        "Теперь пришли файл \"себестоимость на последний день закрытого месяца\".\n"
-        f"Сейчас ориентир по закрытому периоду: {closed_period_end.strftime('%d.%m.%Y')}.\n"
-        "Правило: до 20 числа нужен последний день позапрошлого месяца, "
-        "20 числа и позже — последний день прошлого месяца.\n"
+        "Теперь пришли файл "
+        f"\"себестоимость на последний день закрытого месяца на последнее воскресенье, т.е. {closed_period_end.strftime('%d.%m.%Y')}\".\n"
         "После него я попрошу файл \"остатки по сериям\"."
     )
 # ===== 2CA END =====
