@@ -36,22 +36,22 @@ item_base as (
         r.av_stock_cost,
         r.turns_rub,
         r.nonliq,
-        coalesce(s.statement_qty, r.curr_stock_qty) as adjusted_stock_qty,
+        coalesce(s.statement_qty, 0) as adjusted_stock_qty,
         case
             when c.cost_qty is not null
                  and c.cost_unit is not null
-                 and coalesce(s.statement_qty, r.curr_stock_qty) is not null
+                 and coalesce(s.statement_qty, 0) is not null
                 then case
-                    when c.cost_qty >= coalesce(s.statement_qty, r.curr_stock_qty)
-                        then c.cost_unit * coalesce(s.statement_qty, r.curr_stock_qty)
+                    when c.cost_qty >= coalesce(s.statement_qty, 0)
+                        then c.cost_unit * coalesce(s.statement_qty, 0)
                     else c.cost_total + (
-                        greatest(coalesce(s.statement_qty, r.curr_stock_qty) - c.cost_qty, 0)
+                        greatest(coalesce(s.statement_qty, 0) - c.cost_qty, 0)
                         * coalesce(r.curr_stock_cost / nullif(r.curr_stock_qty, 0), 0)
                     )
                 end
             when s.statement_qty is not null and nullif(r.curr_stock_qty, 0) is not null
                 then (r.curr_stock_cost / nullif(r.curr_stock_qty, 0)) * s.statement_qty
-            else r.curr_stock_cost
+            else 0
         end as adjusted_stock_cost
     from public.raw_turnover_stock r
     join weeks w on w.week_dt = r.period::date

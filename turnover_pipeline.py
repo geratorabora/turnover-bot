@@ -93,45 +93,45 @@ def load_batch_stock_sheet_data(database_url: str, report_date: datetime) -> pd.
             max(trim(r.item)) as item,
             max(trim(r.article)) as article,
             coalesce(nullif(trim(max(r.article)), ''), r.item_code) as article_key,
-            sum(coalesce(s.statement_qty, r.curr_stock_qty)) as turnover_qty,
+            sum(coalesce(s.statement_qty, 0)) as turnover_qty,
             sum(
                 case
                     when c.cost_qty is not null
                          and c.cost_unit is not null
-                         and coalesce(s.statement_qty, r.curr_stock_qty) is not null
+                         and coalesce(s.statement_qty, 0) is not null
                         then case
-                            when c.cost_qty >= coalesce(s.statement_qty, r.curr_stock_qty)
-                                then c.cost_unit * coalesce(s.statement_qty, r.curr_stock_qty)
+                            when c.cost_qty >= coalesce(s.statement_qty, 0)
+                                then c.cost_unit * coalesce(s.statement_qty, 0)
                             else c.cost_total + (
-                                greatest(coalesce(s.statement_qty, r.curr_stock_qty) - c.cost_qty, 0)
+                                greatest(coalesce(s.statement_qty, 0) - c.cost_qty, 0)
                                 * coalesce(r.curr_stock_cost / nullif(r.curr_stock_qty, 0), 0)
                             )
                         end
                     when s.statement_qty is not null and nullif(r.curr_stock_qty, 0) is not null
                         then (r.curr_stock_cost / nullif(r.curr_stock_qty, 0)) * s.statement_qty
-                    else r.curr_stock_cost
+                    else 0
                 end
             ) as turnover_cost,
             case
-                when nullif(sum(coalesce(s.statement_qty, r.curr_stock_qty)), 0) is null then null
+                when nullif(sum(coalesce(s.statement_qty, 0)), 0) is null then null
                 else sum(
                     case
                         when c.cost_qty is not null
                              and c.cost_unit is not null
-                             and coalesce(s.statement_qty, r.curr_stock_qty) is not null
+                             and coalesce(s.statement_qty, 0) is not null
                             then case
-                                when c.cost_qty >= coalesce(s.statement_qty, r.curr_stock_qty)
-                                    then c.cost_unit * coalesce(s.statement_qty, r.curr_stock_qty)
+                                when c.cost_qty >= coalesce(s.statement_qty, 0)
+                                    then c.cost_unit * coalesce(s.statement_qty, 0)
                                 else c.cost_total + (
-                                    greatest(coalesce(s.statement_qty, r.curr_stock_qty) - c.cost_qty, 0)
+                                    greatest(coalesce(s.statement_qty, 0) - c.cost_qty, 0)
                                     * coalesce(r.curr_stock_cost / nullif(r.curr_stock_qty, 0), 0)
                                 )
                             end
                         when s.statement_qty is not null and nullif(r.curr_stock_qty, 0) is not null
                             then (r.curr_stock_cost / nullif(r.curr_stock_qty, 0)) * s.statement_qty
-                        else r.curr_stock_cost
+                        else 0
                     end
-                ) / nullif(sum(coalesce(s.statement_qty, r.curr_stock_qty)), 0)
+                ) / nullif(sum(coalesce(s.statement_qty, 0)), 0)
             end as avg_unit_cost
         from public.raw_turnover_stock r
         left join statement_qty s
@@ -308,22 +308,22 @@ def load_statement_adjustments(database_url: str, report_date: datetime) -> pd.D
     )
     select
         r.item_code,
-        coalesce(s.statement_qty, r.curr_stock_qty) as statement_qty,
+        coalesce(s.statement_qty, 0) as statement_qty,
         case
             when c.cost_qty is not null
                  and c.cost_unit is not null
-                 and coalesce(s.statement_qty, r.curr_stock_qty) is not null
+                 and coalesce(s.statement_qty, 0) is not null
                 then case
-                    when c.cost_qty >= coalesce(s.statement_qty, r.curr_stock_qty)
-                        then c.cost_unit * coalesce(s.statement_qty, r.curr_stock_qty)
+                    when c.cost_qty >= coalesce(s.statement_qty, 0)
+                        then c.cost_unit * coalesce(s.statement_qty, 0)
                     else c.cost_total + (
-                        greatest(coalesce(s.statement_qty, r.curr_stock_qty) - c.cost_qty, 0)
+                        greatest(coalesce(s.statement_qty, 0) - c.cost_qty, 0)
                         * coalesce(r.curr_stock_cost / nullif(r.curr_stock_qty, 0), 0)
                     )
                 end
             when s.statement_qty is not null and nullif(r.curr_stock_qty, 0) is not null
                 then (r.curr_stock_cost / nullif(r.curr_stock_qty, 0)) * s.statement_qty
-            else r.curr_stock_cost
+            else 0
         end as adjusted_stock_cost
     from public.raw_turnover_stock r
     left join statement_qty s
