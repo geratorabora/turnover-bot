@@ -348,6 +348,33 @@ def load_statement_adjustments(database_url: str, report_date: datetime) -> pd.D
 # ===== 2D END =====
 
 
+# ===== 2DA START =====
+def load_availability_adjustments(database_url: str, report_date: datetime) -> pd.DataFrame:
+    """
+    2DA: Подготавливаем "доступно сейчас" по коду номенклатуры для последней детализации.
+    """
+
+    sql = """
+    select
+        item_code,
+        qty_available_now
+    from public.raw_stock_availability
+    where report_dt = %s
+    """
+
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is not set")
+
+    with psycopg.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (report_date.date(),))
+            rows = cur.fetchall()
+            columns = [col.name for col in cur.description]
+
+    return pd.DataFrame(rows, columns=columns)
+# ===== 2DA END =====
+
+
 # ===== 2E START =====
 def load_statement_discrepancies(database_url: str, report_date: datetime) -> pd.DataFrame:
     """
@@ -585,10 +612,15 @@ def build_turnover_report(
     discrepancies_xlsx_path = work_dir / OUTPUT_DISCREPANCIES_XLSX_NAME  # 4A: отдельный xlsx по расхождениям ведомости
     batch_stock_df = None  # 4A: по умолчанию дополнительного листа нет
     statement_adjustments_df = None  # 4A: уточнение количеств/себестоимости для детализации
+    availability_adjustments_df = None  # 4A: уточнение свободного остатка для детализации
     statement_discrepancies_df = None  # 4A: отдельный лист со сверкой ведомости и оборачиваемости
 
     if report_date is not None:
         statement_adjustments_df = load_statement_adjustments(
+            database_url=database_url,
+            report_date=report_date,
+        )
+        availability_adjustments_df = load_availability_adjustments(
             database_url=database_url,
             report_date=report_date,
         )
@@ -614,6 +646,7 @@ def build_turnover_report(
         source_detail_path=source_detail_path,
         batch_stock_df=batch_stock_df,
         statement_adjustments_df=statement_adjustments_df,
+        availability_adjustments_df=availability_adjustments_df,
     )
 
     if not xlsx_path.exists():  # 4A: защита от тихого сбоя генерации

@@ -869,6 +869,7 @@ def add_last_week_detail_sheet(
     wb,
     source_detail_path: Path,
     statement_adjustments_df: Optional[pd.DataFrame] = None,
+    availability_adjustments_df: Optional[pd.DataFrame] = None,
 ) -> None:
     """
     6D: Добавляем в итоговый файл последний лист с детализацией до номенклатуры.
@@ -901,24 +902,26 @@ def add_last_week_detail_sheet(
         "Вал.Пр",
         "Рент. %",
         "Рент.Тов.Зап",
-        "Свободный остаток текущий",
-        "Себестоимость свободного остатка",
-        "Рзв",
-        "Себ.Рзв",
     }
     money_columns = {  # 6D: колонки, где хотим включить отображение с разделением разрядов
         "Конечный остаток (товары)",
         "Себестоимость (из отч. себ)",
-        "Свободный остаток текущий",
+        "Свободный остаток",
         "Себестоимость свободного остатка",
-        "Рзв",
-        "Себ.Рзв",
+        "Остаток в резерве",
+        "Себестоимость резерва",
     }
 
     # 6D: Копируем значения ячеек построчно и поколоночно
     for row in source_ws.iter_rows():  # 6D: идём по всем строкам исходного листа
         for cell in row:  # 6D: идём по всем ячейкам строки
             target_ws[cell.coordinate].value = cell.value  # 6D: переносим значение ячейки
+
+    header_map = {
+        str(target_ws.cell(1, col_num).value).strip(): col_num
+        for col_num in range(1, target_ws.max_column + 1)
+        if target_ws.cell(1, col_num).value is not None
+    }
 
     if statement_adjustments_df is not None and not statement_adjustments_df.empty:  # 6D: если есть уточнение по остаткам
         statement_map = {}
@@ -931,11 +934,6 @@ def add_last_week_detail_sheet(
                 "adjusted_stock_cost": row.get("adjusted_stock_cost"),
             }
 
-        header_map = {
-            str(target_ws.cell(1, col_num).value).strip(): col_num
-            for col_num in range(1, target_ws.max_column + 1)
-            if target_ws.cell(1, col_num).value is not None
-        }
         code_col = header_map.get("Номенклатура.Код")
         qty_col = header_map.get("Конечный остаток (товары)")
         cost_col = header_map.get("Себестоимость (из отч. себ)")
@@ -952,6 +950,57 @@ def add_last_week_detail_sheet(
                     target_ws.cell(row_num, qty_col).value = lookup["statement_qty"]
                 if lookup["adjusted_stock_cost"] is not None:
                     target_ws.cell(row_num, cost_col).value = lookup["adjusted_stock_cost"]
+
+    if availability_adjustments_df is not None and not availability_adjustments_df.empty:  # 6D: если есть уточнение по свободному остатку
+        availability_map = {}
+        for _, row in availability_adjustments_df.iterrows():
+            code = row.get("item_code")
+            if pd.isna(code):
+                continue
+            availability_map[str(code).strip()] = {
+                "qty_available_now": row.get("qty_available_now"),
+            }
+
+        code_col = header_map.get("Номенклатура.Код")
+        qty_col = header_map.get("Конечный остаток (товары)")
+        cost_col = header_map.get("Себестоимость (из отч. себ)")
+        free_qty_col = header_map.get("Свободный остаток текущий")
+        free_cost_col = header_map.get("Себестоимость свободного остатка")
+        reserve_qty_col = header_map.get("Рзв")
+        reserve_cost_col = header_map.get("Себ.Рзв")
+
+        if code_col and qty_col and cost_col and free_qty_col and free_cost_col and reserve_qty_col and reserve_cost_col:
+            for row_num in range(2, target_ws.max_row + 1):
+                code_value = target_ws.cell(row_num, code_col).value
+                if code_value is None:
+                    continue
+
+                lookup = availability_map.get(str(code_value).strip())
+                if not lookup:
+                    continue
+
+                corrected_qty = pd.to_numeric(target_ws.cell(row_num, qty_col).value, errors="coerce")
+                corrected_cost = pd.to_numeric(target_ws.cell(row_num, cost_col).value, errors="coerce")
+                free_qty = lookup["qty_available_now"]
+                free_qty = pd.to_numeric(free_qty, errors="coerce")
+
+                if pd.isna(corrected_qty):
+                    continue
+                if pd.isna(free_qty):
+                    free_qty = 0
+
+                avg_unit_cost = None
+                if not pd.isna(corrected_cost) and corrected_qty not in (0, None):
+                    avg_unit_cost = corrected_cost / corrected_qty
+
+                reserve_qty = max(corrected_qty - free_qty, 0)
+                free_cost = avg_unit_cost * free_qty if avg_unit_cost is not None else None
+                reserve_cost = avg_unit_cost * reserve_qty if avg_unit_cost is not None else None
+
+                target_ws.cell(row_num, free_qty_col).value = free_qty
+                target_ws.cell(row_num, free_cost_col).value = free_cost
+                target_ws.cell(row_num, reserve_qty_col).value = reserve_qty
+                target_ws.cell(row_num, reserve_cost_col).value = reserve_cost
 
     # 6D: Определяем, похожа ли последняя строка на строку итогов
     if target_ws.max_row >= 2:  # 6D: есть смысл проверять только если строк больше одной
@@ -982,6 +1031,18 @@ def add_last_week_detail_sheet(
 
     for col_num in reversed(cols_to_delete):  # 6D: удаляем справа налево, чтобы индексы не сдвигались
         target_ws.delete_cols(col_num, 1)  # 6D: физически удаляем ненужную колонку
+
+    renamed_headers = {
+        "Свободный остаток текущий": "Свободный остаток",
+        "Рзв": "Остаток в резерве",
+        "Себ.Рзв": "Себестоимость резерва",
+    }
+    for col_num in range(1, target_ws.max_column + 1):
+        header_cell = target_ws.cell(1, col_num)
+        if isinstance(header_cell.value, str):
+            normalized_header = header_cell.value.strip()
+            if normalized_header in renamed_headers:
+                header_cell.value = renamed_headers[normalized_header]
 
     header_font = Font(bold=True)  # 6D: шрифт шапки
     header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)  # 6D: переносы в шапке
@@ -1334,6 +1395,7 @@ def convert_turnover_csv_to_xlsx(
     source_detail_path: Optional[str | Path] = None,
     batch_stock_df: Optional[pd.DataFrame] = None,
     statement_adjustments_df: Optional[pd.DataFrame] = None,
+    availability_adjustments_df: Optional[pd.DataFrame] = None,
 ) -> Path:
     """
     7A: Главная функция:
@@ -1458,6 +1520,7 @@ def convert_turnover_csv_to_xlsx(
         wb=wb,
         source_detail_path=detail_path,
         statement_adjustments_df=statement_adjustments_df,
+        availability_adjustments_df=availability_adjustments_df,
     )  # 7A: добавляем лист с детализацией до номенклатуры за последнюю неделю
 
     add_batch_stock_sheet(

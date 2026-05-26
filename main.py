@@ -32,6 +32,7 @@ TABLE_NAME: str = "public.raw_turnover_stock"  # 1C: целевая таблиц
 BATCH_TABLE_NAME: str = "public.raw_stock_batches"  # 1C: целевая таблица второго сырого слоя по сериям
 STATEMENT_TABLE_NAME: str = "public.raw_stock_statement"  # 1C: сырой слой ведомости остатков
 COST_TABLE_NAME: str = "public.raw_stock_month_cost"  # 1C: сырой слой себестоимости закрытого периода
+AVAILABILITY_TABLE_NAME: str = "public.raw_stock_availability"  # 1C: сырой слой остатков и доступности
 
 # 1C: синонимы значений да/нет (часто встречаются в отчётах)
 TRUE_WORDS = {"1", "true", "True", "TRUE", "да", "Да", "ДА", "yes", "Yes", "Y", "y"}
@@ -111,10 +112,22 @@ COST_RUS_TO_DB: Dict[str, str] = {
 }
 REQUIRED_COST_DB_COLS = set(COST_RUS_TO_DB.values())
 
+AVAILABILITY_RUS_TO_DB: Dict[str, str] = {
+    "Номенклатура": "item",
+    "Номенклатура.Код": "item_code",
+    "Артикул": "article",
+    "В наличии": "qty_in_stock",
+    "В резерве": "qty_reserved",
+    "Доступно сейчас": "qty_available_now",
+    "Отгружается": "qty_shipping",
+}
+REQUIRED_AVAILABILITY_DB_COLS = set(AVAILABILITY_RUS_TO_DB.values())
+
 MAIN_REPORT_HINT_COLS = {"Номенклатура.Код", "Оборачиваемость, руб", "Конечный остаток (товары)"}
 BATCH_REPORT_HINT_COLS = {"Номенклатура.Код", "Номенклатура.Качество", "Годен до", "Серия", "Конечный остаток"}
 STATEMENT_REPORT_HINT_COLS = {"Номенклатура.Код", "Количество", "Ед. изм.", "Артикул"}
 COST_REPORT_HINT_COLS = {"Номенклатура.Код", "Количество (конечный остаток)", "Себестоимость (конечный остаток)"}
+AVAILABILITY_REPORT_HINT_COLS = {"Номенклатура.Код", "В наличии", "Доступно сейчас", "Отгружается"}
 
 
 @dataclass
@@ -124,7 +137,7 @@ class PendingUploadSession:
     main_report_path: Path  # 1C: путь к загруженному основному отчёту
     main_source_filename: str  # 1C: имя исходного основного файла
     report_date: datetime  # 1C: общая дата отчёта для обеих загрузок
-    expected_next: str  # 1C: какой файл ждём следующим: statement, cost или batch
+    expected_next: str  # 1C: какой файл ждём следующим: statement, cost, availability или batch
 
 
 PENDING_UPLOADS: Dict[int, PendingUploadSession] = {}  # 1C: минимальное состояние по чатам
@@ -479,6 +492,38 @@ def row_to_payload(row: Any) -> Dict[str, Any]:
 # ===== 2B END =====
 
 
+# ===== 2D START =====
+def read_upload_excel(path: Path) -> pd.DataFrame:
+    """
+    2D: Читаем входящий Excel с учётом капризной шапки 1С у отчёта
+        "остатки и доступность".
+    """
+
+    df = pd.read_excel(path)
+
+    if detect_report_kind(df) == "availability":
+        return df
+
+    normalized_cols = [normalize_excel_header(col) for col in df.columns]
+    looks_like_availability_title = False
+    if len(df.columns) > 0 and df.columns[0] is not None:
+        first_header = normalize_excel_header(df.columns[0])
+        looks_like_availability_title = first_header == "Остатки и доступность товаров"
+
+    if looks_like_availability_title or sum(col.startswith("Unnamed:") for col in normalized_cols) >= max(1, len(normalized_cols) - 3):
+        try:
+            availability_df = pd.read_excel(path, header=5)
+            availability_df = availability_df.loc[:, ~availability_df.columns.astype(str).str.startswith("Unnamed:")]
+            availability_df.columns = [normalize_excel_header(col) for col in availability_df.columns]
+            if detect_report_kind(availability_df) == "availability":
+                return availability_df
+        except Exception:
+            pass
+
+    return df
+# ===== 2D END =====
+
+
 # ===== 3A START =====
 def db_connect() -> psycopg.Connection:
     # 3A: соединение с БД
@@ -764,6 +809,47 @@ def ensure_schema() -> None:
         on {COST_TABLE_NAME} (report_dt, item_code);
         """
     )
+
+    db_exec(
+        f"""
+        create table if not exists {AVAILABILITY_TABLE_NAME} (
+            id bigserial primary key,
+            report_dt date not null,
+            loaded_ts timestamptz not null default now(),
+            source_file text,
+
+            item text,
+            item_code text,
+            article text,
+            qty_in_stock numeric,
+            qty_reserved numeric,
+            qty_available_now numeric,
+            qty_shipping numeric,
+            payload jsonb,
+
+            constraint ux_raw_stock_availability unique (report_dt, item_code)
+        );
+        """
+    )
+
+    db_exec(f"alter table {AVAILABILITY_TABLE_NAME} add column if not exists report_dt date;")
+    db_exec(f"alter table {AVAILABILITY_TABLE_NAME} add column if not exists loaded_ts timestamptz not null default now();")
+    db_exec(f"alter table {AVAILABILITY_TABLE_NAME} add column if not exists source_file text;")
+    db_exec(f"alter table {AVAILABILITY_TABLE_NAME} add column if not exists item text;")
+    db_exec(f"alter table {AVAILABILITY_TABLE_NAME} add column if not exists item_code text;")
+    db_exec(f"alter table {AVAILABILITY_TABLE_NAME} add column if not exists article text;")
+    db_exec(f"alter table {AVAILABILITY_TABLE_NAME} add column if not exists qty_in_stock numeric;")
+    db_exec(f"alter table {AVAILABILITY_TABLE_NAME} add column if not exists qty_reserved numeric;")
+    db_exec(f"alter table {AVAILABILITY_TABLE_NAME} add column if not exists qty_available_now numeric;")
+    db_exec(f"alter table {AVAILABILITY_TABLE_NAME} add column if not exists qty_shipping numeric;")
+    db_exec(f"alter table {AVAILABILITY_TABLE_NAME} add column if not exists payload jsonb;")
+
+    db_exec(
+        f"""
+        create unique index if not exists ux_raw_stock_availability_report_code
+        on {AVAILABILITY_TABLE_NAME} (report_dt, item_code);
+        """
+    )
 # ===== 3B END =====
 
 
@@ -969,6 +1055,8 @@ def detect_report_kind(df: pd.DataFrame) -> Optional[str]:
         return "statement"
     if COST_REPORT_HINT_COLS.issubset(normalized_cols):
         return "cost"
+    if AVAILABILITY_REPORT_HINT_COLS.issubset(normalized_cols):
+        return "availability"
     if BATCH_REPORT_HINT_COLS.issubset(normalized_cols):
         return "batch"
     return None
@@ -1243,6 +1331,83 @@ def upsert_cost_dataframe(df: pd.DataFrame, source_file: str, report_date: datet
     return (len(df), len(rows))
 
 
+def upsert_availability_dataframe(df: pd.DataFrame, source_file: str, report_date: datetime) -> Tuple[int, int]:
+    # 3D: загрузчик отчёта "остатки и доступность" в отдельную raw-таблицу
+    if df.empty:
+        return (0, 0)
+
+    df = df.copy()
+    df.columns = [normalize_excel_header(col) for col in df.columns]
+    df = df.loc[:, ~df.columns.astype(str).str.startswith("Unnamed:")]
+    df = df.rename(columns=AVAILABILITY_RUS_TO_DB)
+
+    missing = sorted(list(REQUIRED_AVAILABILITY_DB_COLS - set(df.columns)))
+    if missing:
+        actual_cols = list(df.columns)
+        raise ValueError(
+            f"Missing required availability columns after rename: {missing}. "
+            f"Actual columns after normalize/rename: {actual_cols}"
+        )
+
+    report_dt = report_date.date()
+    rows: List[Tuple[Any, ...]] = []
+
+    for i in range(len(df)):
+        row = df.iloc[i]
+        item_code = _s(row.get("item_code"))
+        qty_in_stock = parse_numeric(row.get("qty_in_stock"))
+        qty_available_now = parse_numeric(row.get("qty_available_now"))
+        if not item_code:
+            continue
+        if qty_in_stock is None and qty_available_now is None:
+            continue
+
+        rows.append(
+            (
+                report_dt,
+                source_file,
+                _s(row.get("item")),
+                item_code,
+                _s(row.get("article")),
+                qty_in_stock,
+                parse_numeric(row.get("qty_reserved")),
+                qty_available_now,
+                parse_numeric(row.get("qty_shipping")),
+                Jsonb(row_to_payload(row)),
+            )
+        )
+
+    sql = f"""
+    insert into {AVAILABILITY_TABLE_NAME} (
+        report_dt, source_file, item, item_code, article,
+        qty_in_stock, qty_reserved, qty_available_now, qty_shipping, payload
+    )
+    values (
+        %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s
+    )
+    on conflict (report_dt, item_code)
+    do update set
+        loaded_ts = now(),
+        source_file = excluded.source_file,
+        item = excluded.item,
+        article = excluded.article,
+        qty_in_stock = excluded.qty_in_stock,
+        qty_reserved = excluded.qty_reserved,
+        qty_available_now = excluded.qty_available_now,
+        qty_shipping = excluded.qty_shipping,
+        payload = excluded.payload
+    ;
+    """
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(sql, rows)
+        conn.commit()
+
+    return (len(df), len(rows))
+
+
 def cleanup_pending_session(chat_id: int) -> None:
     # 3D: очищаем временные файлы после завершения цикла
     session = PENDING_UPLOADS.pop(chat_id, None)
@@ -1346,6 +1511,7 @@ def register_start(dp: Dispatcher) -> None:
             "Бот запущен. Жду основной Excel по оборачиваемости 📊\n"
             "После него пришли файл с ведомостью по остаткам,\n"
             "потом — файл себестоимости закрытого периода,\n"
+            "потом — файл \"остатки и доступность\",\n"
             "и уже после этого — остатки по сериям."
         )
 # ===== 4B END =====
@@ -1362,7 +1528,10 @@ def register_db_check(dp: Dispatcher) -> None:
             batch_row = db_fetchone(f"select to_regclass('{BATCH_TABLE_NAME}');")
             statement_row = db_fetchone(f"select to_regclass('{STATEMENT_TABLE_NAME}');")
             cost_row = db_fetchone(f"select to_regclass('{COST_TABLE_NAME}');")
-            await message.answer(f"✅ БД доступна. Таблицы: {row[0]}, {statement_row[0]}, {cost_row[0]}, {batch_row[0]}")
+            availability_row = db_fetchone(f"select to_regclass('{AVAILABILITY_TABLE_NAME}');")
+            await message.answer(
+                f"✅ БД доступна. Таблицы: {row[0]}, {statement_row[0]}, {cost_row[0]}, {availability_row[0]}, {batch_row[0]}"
+            )
         except Exception as e:
             await message.answer(f"❌ Ошибка БД: {type(e).__name__}: {e}")
 # ===== 4C END =====
@@ -1387,7 +1556,7 @@ def register_excel_upload(dp: Dispatcher) -> None:
 
             # ===== 5B START =====
             try:
-                df = pd.read_excel(tmp_path)
+                df = read_upload_excel(tmp_path)
             except Exception as e:
                 await message.answer(f"❌ Не смог прочитать Excel: {type(e).__name__}: {e}")
                 shutil.rmtree(tmp_root, ignore_errors=True)
@@ -1445,7 +1614,7 @@ def register_excel_upload(dp: Dispatcher) -> None:
                     f"Строк к вставке (после фильтров): {attempt_rows}\n"
                     f"Колонок в файле: {len(cols)}\n\n"
                     "Теперь пришли файл \"остатки из ведомости\".\n"
-                    "После него я попрошу файл себестоимости, а потом — \"остатки по сериям\"."
+                    "После него я попрошу файл себестоимости, потом — \"остатки и доступность\", а потом — \"остатки по сериям\"."
                 )
                 return
 
@@ -1489,7 +1658,7 @@ def register_excel_upload(dp: Dispatcher) -> None:
                     f"Строк в файле: {total_rows}\n"
                     f"Строк к вставке (после фильтров): {attempt_rows}\n"
                     f"{build_cost_report_prompt()}\n"
-                    "После него можно будет прислать файл \"остатки по сериям\" или написать: пропустить"
+                    "После него я попрошу файл \"остатки и доступность\"."
                 )
                 shutil.rmtree(tmp_root, ignore_errors=True)
                 return
@@ -1522,9 +1691,9 @@ def register_excel_upload(dp: Dispatcher) -> None:
                     shutil.rmtree(tmp_root, ignore_errors=True)
                     return
 
-                session.expected_next = "batch"
+                session.expected_next = "availability"
                 logging.info(
-                    "session_state_set chat_id=%s next_step=batch report_date=%s source_file=%s",
+                    "session_state_set chat_id=%s next_step=availability report_date=%s source_file=%s",
                     message.chat.id,
                     session.report_date.date(),
                     filename,
@@ -1534,8 +1703,9 @@ def register_excel_upload(dp: Dispatcher) -> None:
                     "✅ Отчёт по себестоимости закрытого периода загружен.\n"
                     f"Строк в файле: {total_rows}\n"
                     f"Строк к вставке (после фильтров): {attempt_rows}\n"
-                    "Теперь пришли файл \"остатки по сериям\".\n"
-                    "Если его сейчас нет, просто напиши: пропустить"
+                    "Теперь пришли файл \"остатки и доступность\".\n"
+                    "Из него я возьму \"доступно сейчас\" для свободного остатка и резерва.\n"
+                    "После него можно будет прислать файл \"остатки по сериям\" или написать: пропустить"
                 )
                 logging.info(
                     "cost_step_done chat_id=%s filename=%s total_rows=%s attempt_rows=%s",
@@ -1547,17 +1717,62 @@ def register_excel_upload(dp: Dispatcher) -> None:
                 shutil.rmtree(tmp_root, ignore_errors=True)
                 return
 
+            if report_kind == "availability":
+                session = PENDING_UPLOADS.get(message.chat.id)
+                if session is None:
+                    await message.answer(
+                        "Сначала пришли основной отчёт по оборачиваемости, потом ведомость остатков, потом себестоимость, и только потом файл \"остатки и доступность\"."
+                    )
+                    shutil.rmtree(tmp_root, ignore_errors=True)
+                    return
+                if session.expected_next != "availability":
+                    await message.answer(
+                        "Сейчас я жду предыдущий шаг. До файла \"остатки и доступность\" нужно прислать ведомость остатков и файл себестоимости."
+                    )
+                    shutil.rmtree(tmp_root, ignore_errors=True)
+                    return
+
+                try:
+                    ensure_schema()
+                    total_rows, attempt_rows = upsert_availability_dataframe(
+                        df=df,
+                        source_file=filename,
+                        report_date=session.report_date,
+                    )
+                except Exception as e:
+                    await message.answer(f"❌ Ошибка загрузки отчёта \"остатки и доступность\": {type(e).__name__}: {e}")
+                    shutil.rmtree(tmp_root, ignore_errors=True)
+                    return
+
+                session.expected_next = "batch"
+                logging.info(
+                    "session_state_set chat_id=%s next_step=batch report_date=%s source_file=%s",
+                    message.chat.id,
+                    session.report_date.date(),
+                    filename,
+                )
+
+                await message.answer(
+                    "✅ Отчёт \"остатки и доступность\" загружен.\n"
+                    f"Строк в файле: {total_rows}\n"
+                    f"Строк к вставке (после фильтров): {attempt_rows}\n"
+                    "Теперь пришли файл \"остатки по сериям\".\n"
+                    "Если его сейчас нет, просто напиши: пропустить"
+                )
+                shutil.rmtree(tmp_root, ignore_errors=True)
+                return
+
             if report_kind == "batch":
                 session = PENDING_UPLOADS.get(message.chat.id)
                 if session is None:
                     await message.answer(
-                        "Сначала пришли основной отчёт по оборачиваемости, потом ведомость остатков, потом себестоимость, и только потом файл \"остатки по сериям\"."
+                        "Сначала пришли основной отчёт по оборачиваемости, потом ведомость остатков, потом себестоимость, потом \"остатки и доступность\", и только потом файл \"остатки по сериям\"."
                     )
                     shutil.rmtree(tmp_root, ignore_errors=True)
                     return
                 if session.expected_next != "batch":
                     await message.answer(
-                        "Сейчас я жду предыдущий шаг. До отчёта по сериям нужно прислать ведомость остатков и файл себестоимости."
+                        "Сейчас я жду предыдущий шаг. До отчёта по сериям нужно прислать ведомость остатков, файл себестоимости и \"остатки и доступность\"."
                     )
                     shutil.rmtree(tmp_root, ignore_errors=True)
                     return
@@ -1586,7 +1801,7 @@ def register_excel_upload(dp: Dispatcher) -> None:
 
             await message.answer(
                 "Файл прочитан, но я не понял его тип.\n"
-                "Ожидал основной отчёт по оборачиваемости, ведомость остатков, файл себестоимости закрытого периода или отчёт \"остатки по сериям\".\n"
+                "Ожидал основной отчёт по оборачиваемости, ведомость остатков, файл себестоимости закрытого периода, отчёт \"остатки и доступность\" или отчёт \"остатки по сериям\".\n"
                 f"Первые колонки: {cols[:8]}"
             )
             shutil.rmtree(tmp_root, ignore_errors=True)
@@ -1614,6 +1829,9 @@ def register_skip_batch(dp: Dispatcher) -> None:
                 return
             if session.expected_next == "cost":
                 await message.answer("Отчёт по себестоимости сейчас обязательный. Сначала пришли файл себестоимости закрытого периода.")
+                return
+            if session.expected_next == "availability":
+                await message.answer("Файл \"остатки и доступность\" сейчас обязательный. Сначала пришли его.")
                 return
 
             await message.answer("Ок, собираю отчёт без данных по сериям...")
