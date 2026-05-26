@@ -951,15 +951,16 @@ def add_last_week_detail_sheet(
                 if lookup["adjusted_stock_cost"] is not None:
                     target_ws.cell(row_num, cost_col).value = lookup["adjusted_stock_cost"]
 
-    if availability_adjustments_df is not None and not availability_adjustments_df.empty:  # 6D: если есть уточнение по свободному остатку
+    if availability_adjustments_df is not None:  # 6D: если шаг с остатками и доступностью уже пройден
         availability_map = {}
-        for _, row in availability_adjustments_df.iterrows():
-            code = row.get("item_code")
-            if pd.isna(code):
-                continue
-            availability_map[str(code).strip()] = {
-                "qty_available_now": row.get("qty_available_now"),
-            }
+        if not availability_adjustments_df.empty:
+            for _, row in availability_adjustments_df.iterrows():
+                code = row.get("item_code")
+                if pd.isna(code):
+                    continue
+                availability_map[str(code).strip()] = {
+                    "qty_available_now": row.get("qty_available_now"),
+                }
 
         code_col = header_map.get("Номенклатура.Код")
         qty_col = header_map.get("Конечный остаток (товары)")
@@ -975,13 +976,11 @@ def add_last_week_detail_sheet(
                 if code_value is None:
                     continue
 
-                lookup = availability_map.get(str(code_value).strip())
-                if not lookup:
-                    continue
+                lookup = availability_map.get(str(code_value).strip(), {})
 
                 corrected_qty = pd.to_numeric(target_ws.cell(row_num, qty_col).value, errors="coerce")
                 corrected_cost = pd.to_numeric(target_ws.cell(row_num, cost_col).value, errors="coerce")
-                free_qty = lookup["qty_available_now"]
+                free_qty = lookup.get("qty_available_now")
                 free_qty = pd.to_numeric(free_qty, errors="coerce")
 
                 if pd.isna(corrected_qty):
