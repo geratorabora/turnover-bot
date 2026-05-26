@@ -202,7 +202,7 @@ def load_batch_stock_sheet_data(database_url: str, report_date: datetime) -> pd.
         on ta.article_key = b.article_key
     left join batch_article_qty ba
         on ba.article_key = b.article_key
-    where coalesce(t.supplier, '') ilike 'Эрго Продакш%'
+    where coalesce(t.supplier, '') ilike 'Эрго Продакш%%'
     order by
         case
             when b.months_on_stock > 12 then 1
