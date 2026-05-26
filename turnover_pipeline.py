@@ -92,6 +92,7 @@ def load_batch_stock_sheet_data(database_url: str, report_date: datetime) -> pd.
             r.item_code,
             max(trim(r.item)) as item,
             max(trim(r.article)) as article,
+            max(trim(r.supplier)) as supplier,
             coalesce(nullif(trim(max(r.article)), ''), r.item_code) as article_key,
             sum(coalesce(s.statement_qty, 0)) as turnover_qty,
             sum(
@@ -201,6 +202,7 @@ def load_batch_stock_sheet_data(database_url: str, report_date: datetime) -> pd.
         on ta.article_key = b.article_key
     left join batch_article_qty ba
         on ba.article_key = b.article_key
+    where coalesce(t.supplier, '') ilike 'Эрго Продакш%'
     order by
         case
             when b.months_on_stock > 12 then 1
