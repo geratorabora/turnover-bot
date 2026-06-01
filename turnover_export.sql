@@ -5,6 +5,10 @@ with weeks as (
     from public.raw_turnover_stock
     group by period::date
 ),
+latest_report as (
+    select max(period::date) as report_dt
+    from public.raw_turnover_stock
+),
 statement_qty as (
     select
         report_dt,
@@ -36,9 +40,13 @@ item_base as (
         r.av_stock_cost,
         r.turns_rub,
         r.nonliq,
-        coalesce(s.statement_qty, 0) as adjusted_stock_qty,
         case
-            when c.cost_qty is not null
+            when r.period::date = lr.report_dt then coalesce(s.statement_qty, 0)
+            else r.curr_stock_qty
+        end as adjusted_stock_qty,
+        case
+            when r.period::date = lr.report_dt
+                 and c.cost_qty is not null
                  and c.cost_unit is not null
                  and coalesce(s.statement_qty, 0) is not null
                 then case
@@ -49,12 +57,15 @@ item_base as (
                         * coalesce(r.curr_stock_cost / nullif(r.curr_stock_qty, 0), 0)
                     )
                 end
-            when s.statement_qty is not null and nullif(r.curr_stock_qty, 0) is not null
+            when r.period::date = lr.report_dt
+                 and s.statement_qty is not null
+                 and nullif(r.curr_stock_qty, 0) is not null
                 then (r.curr_stock_cost / nullif(r.curr_stock_qty, 0)) * s.statement_qty
-            else 0
+            else r.curr_stock_cost
         end as adjusted_stock_cost
     from public.raw_turnover_stock r
     join weeks w on w.week_dt = r.period::date
+    cross join latest_report lr
     left join statement_qty s
         on s.report_dt = r.period::date
        and s.item_code = r.item_code
