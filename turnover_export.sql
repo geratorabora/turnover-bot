@@ -3,11 +3,13 @@ with weeks as (
         period::date as week_dt,
         dense_rank() over (order by period::date) as week_num
     from public.raw_turnover_stock
+    where extract(isodow from period::date) = 7
     group by period::date
 ),
 latest_report as (
     select max(period::date) as report_dt
     from public.raw_turnover_stock
+    where extract(isodow from period::date) = 7
 ),
 statement_qty as (
     select
